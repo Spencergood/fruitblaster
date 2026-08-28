@@ -2,6 +2,7 @@ import Phaser from "phaser";
 
 const WIDTH = 960;
 const HEIGHT = 640;
+const PADDLE_Y = HEIGHT - 54;
 const COLORS = {
   ink: 0x081735,
   blue: 0x143d88,
@@ -25,6 +26,7 @@ class GameScene extends Phaser.Scene {
   private balls!: Phaser.Physics.Arcade.Group;
   private bricks!: Phaser.Physics.Arcade.StaticGroup;
   private drops!: Phaser.Physics.Arcade.Group;
+  private embeddedFruits!: Phaser.GameObjects.Group;
   private scoreText!: Phaser.GameObjects.Text;
   private livesText!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
@@ -59,13 +61,15 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    this.paddle = this.physics.add.image(WIDTH / 2, HEIGHT - 54, "paddle");
-    this.paddle.setImmovable(true).setCollideWorldBounds(true);
-    this.paddle.body.setAllowGravity(false);
+    // The paddle is intentionally a STATIC Arcade body. It can still be moved
+    // by us, but the collision solver can never kick it upward or shove it
+    // around when a ball hits it. Every manual move refreshes the static body.
+    this.paddle = this.physics.add.staticImage(WIDTH / 2, PADDLE_Y, "paddle");
 
     this.balls = this.physics.add.group({ allowGravity: false });
     this.drops = this.physics.add.group({ allowGravity: false });
     this.bricks = this.physics.add.staticGroup();
+    this.embeddedFruits = this.add.group();
 
     this.physics.world.setBoundsCollision(true, true, true, false);
     this.physics.add.collider(this.balls, this.paddle, this.onBallPaddle, undefined, this);
@@ -77,7 +81,7 @@ class GameScene extends Phaser.Scene {
 
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
       if (this.gameOver) return;
-      this.paddle.x = Phaser.Math.Clamp(pointer.x, this.paddle.displayWidth / 2 + 12, WIDTH - this.paddle.displayWidth / 2 - 12);
+      this.movePaddle(pointer.x);
       if (!this.launched) this.attachUnlaunchedBalls();
     });
 
@@ -97,11 +101,7 @@ class GameScene extends Phaser.Scene {
     if (this.cursors.right.isDown || this.keys.D.isDown) direction += 1;
 
     if (direction !== 0) {
-      this.paddle.x = Phaser.Math.Clamp(
-        this.paddle.x + direction * this.paddleSpeed * dt,
-        this.paddle.displayWidth / 2 + 12,
-        WIDTH - this.paddle.displayWidth / 2 - 12,
-      );
+      this.movePaddle(this.paddle.x + direction * this.paddleSpeed * dt);
       if (!this.launched) this.attachUnlaunchedBalls();
     }
 
@@ -114,40 +114,114 @@ class GameScene extends Phaser.Scene {
 
     this.drops.getChildren().forEach((child) => {
       const drop = child as Phaser.Physics.Arcade.Image;
-      if (drop.y > HEIGHT + 40) drop.destroy();
+      const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
+      halo?.setPosition(drop.x, drop.y);
+      if (drop.y > HEIGHT + 40) {
+        halo?.destroy();
+        drop.destroy();
+      }
     });
 
     if (this.launched && this.balls.countActive(true) === 0) this.loseLife();
   }
 
+  private movePaddle(x: number) {
+    const half = this.paddle.displayWidth / 2;
+    this.paddle.setPosition(Phaser.Math.Clamp(x, half + 12, WIDTH - half - 12), PADDLE_Y);
+    this.paddle.refreshBody();
+  }
+
   private createTextures() {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
 
-    g.fillStyle(0xd9f1ff, 0.88);
-    g.fillRoundedRect(0, 0, 72, 30, 6);
-    g.lineStyle(2, 0xffffff, 0.9);
-    g.strokeRoundedRect(1, 1, 70, 28, 6);
-    g.lineStyle(2, 0x7cb7dc, 0.45);
-    g.beginPath();
-    g.moveTo(7, 25);
-    g.lineTo(63, 25);
-    g.strokePath();
+    // ICE / GLASS BRICK -----------------------------------------------------
+    // A deliberately overbuilt tiny texture: transparent body, darker lower
+    // bevel, bright upper bevel, internal blue refraction and hard highlights.
+    // The WebGL shine pass added later is only the moving specular layer.
+    g.fillStyle(0x071b37, 0.42);
+    g.fillRoundedRect(2, 4, 69, 26, 6);
+
+    g.fillStyle(0x8ed5f7, 0.48);
+    g.fillRoundedRect(0, 0, 70, 27, 6);
+
+    g.fillStyle(0xdff6ff, 0.34);
+    g.fillRoundedRect(4, 4, 62, 19, 4);
+
+    g.fillStyle(0xffffff, 0.25);
+    g.fillTriangle(4, 4, 66, 4, 61, 9);
+    g.fillTriangle(4, 4, 9, 9, 9, 22);
+
+    g.fillStyle(0x397faa, 0.22);
+    g.fillTriangle(9, 22, 61, 22, 66, 26);
+    g.fillTriangle(61, 9, 66, 4, 66, 26);
+
+    g.lineStyle(1, 0xffffff, 0.92);
+    g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
+    g.lineStyle(1, 0xbcecff, 0.6);
+    g.strokeRoundedRect(4.5, 4.5, 61, 18, 4);
+
+    g.lineStyle(2, 0xffffff, 0.62);
+    g.lineBetween(9, 5, 28, 5);
+    g.lineStyle(1, 0xffffff, 0.42);
+    g.lineBetween(46, 8, 61, 12);
+    g.lineBetween(13, 19, 27, 9);
     g.generateTexture("brick", 72, 30);
     g.clear();
 
-    g.fillStyle(0xeaf8ff, 0.94);
-    g.fillRoundedRect(0, 0, this.basePaddleWidth, 22, 10);
-    g.lineStyle(2, 0xffffff, 1);
-    g.strokeRoundedRect(1, 1, this.basePaddleWidth - 2, 20, 10);
-    g.fillStyle(COLORS.blue, 1);
-    g.fillRoundedRect(18, 7, this.basePaddleWidth - 36, 8, 4);
-    g.generateTexture("paddle", this.basePaddleWidth, 22);
+    // Cracked ice texture used after the first hit on reinforced blocks.
+    g.fillStyle(0x071b37, 0.42);
+    g.fillRoundedRect(2, 4, 69, 26, 6);
+    g.fillStyle(0x8ed5f7, 0.48);
+    g.fillRoundedRect(0, 0, 70, 27, 6);
+    g.fillStyle(0xdff6ff, 0.34);
+    g.fillRoundedRect(4, 4, 62, 19, 4);
+    g.fillStyle(0xffffff, 0.25);
+    g.fillTriangle(4, 4, 66, 4, 61, 9);
+    g.fillTriangle(4, 4, 9, 9, 9, 22);
+    g.fillStyle(0x397faa, 0.22);
+    g.fillTriangle(9, 22, 61, 22, 66, 26);
+    g.fillTriangle(61, 9, 66, 4, 66, 26);
+    g.lineStyle(1, 0xffffff, 0.92);
+    g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
+    g.lineStyle(1.4, 0xeafaff, 0.86);
+    g.beginPath();
+    g.moveTo(35, 3);
+    g.lineTo(32, 10);
+    g.lineTo(38, 14);
+    g.lineTo(33, 21);
+    g.lineTo(35, 27);
+    g.moveTo(32, 10);
+    g.lineTo(24, 13);
+    g.lineTo(18, 20);
+    g.moveTo(38, 14);
+    g.lineTo(48, 11);
+    g.lineTo(56, 15);
+    g.strokePath();
+    g.generateTexture("brick-cracked", 72, 30);
+    g.clear();
+
+    // Paddle keeps the same icy material language, but much thicker.
+    g.fillStyle(0x06172e, 0.55);
+    g.fillRoundedRect(2, 4, this.basePaddleWidth - 2, 19, 9);
+    g.fillStyle(0x9fddf8, 0.78);
+    g.fillRoundedRect(0, 0, this.basePaddleWidth, 20, 9);
+    g.fillStyle(0xeaf8ff, 0.45);
+    g.fillRoundedRect(5, 3, this.basePaddleWidth - 10, 11, 6);
+    g.fillStyle(COLORS.blue, 0.95);
+    g.fillRoundedRect(18, 8, this.basePaddleWidth - 36, 7, 4);
+    g.lineStyle(2, 0xffffff, 0.88);
+    g.lineBetween(9, 3, 54, 3);
+    g.lineStyle(1, 0xffffff, 0.75);
+    g.strokeRoundedRect(0.5, 0.5, this.basePaddleWidth - 1, 19, 9);
+    g.generateTexture("paddle", this.basePaddleWidth, 24);
     g.clear();
 
     g.fillStyle(0xffffff, 1);
     g.fillCircle(9, 9, 8);
     g.lineStyle(2, 0x9fdcff, 0.9);
     g.strokeCircle(9, 9, 7);
+    g.fillStyle(0xc8f1ff, 0.8);
+    g.fillCircle(6, 5, 2.2);
     g.generateTexture("ball", 18, 18);
     g.destroy();
   }
@@ -187,7 +261,13 @@ class GameScene extends Phaser.Scene {
   private startLevel() {
     this.bricks.clear(true, true);
     this.balls.clear(true, true);
+    this.drops.getChildren().forEach((child) => {
+      const drop = child as Phaser.Physics.Arcade.Image;
+      const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
+      halo?.destroy();
+    });
     this.drops.clear(true, true);
+    this.embeddedFruits.clear(true, true);
     this.launched = false;
 
     const cols = 11;
@@ -209,22 +289,35 @@ class GameScene extends Phaser.Scene {
         const x = startX + col * (brickW + gap);
         const y = startY + row * 40;
         const brick = this.bricks.create(x, y, "brick") as Phaser.Physics.Arcade.Image;
+        brick.setDepth(2);
         const hp = this.level >= 3 && row < 2 ? 2 : 1;
         const data: BrickData = { hp };
 
         if (specialCells.has(index)) {
           data.power = specials[specialIndex % specials.length];
           specialIndex++;
-          const fruit = this.add.image(x, y, `fruit-${data.power}`).setDisplaySize(27, 27).setAlpha(0.88).setDepth(1);
+          const fruit = this.add
+            .image(x, y, `fruit-${data.power}`)
+            .setDisplaySize(25, 25)
+            .setAlpha(0.82)
+            .setDepth(1);
+          this.embeddedFruits.add(fruit);
           brick.setData("fruitSprite", fruit);
         }
 
         brick.setData("brickData", data);
-        if (hp > 1) brick.setTint(0x96c8e8);
+        if (hp > 1) brick.setTint(0x8fc9e8);
+
+        // Phaser's built-in Shine is a real WebGL pre-FX shader. A subset of
+        // blocks gets it so the wall catches moving highlights without running
+        // dozens of expensive shader passes on every frame.
+        if (this.game.renderer.type === Phaser.WEBGL && index % 4 === 0) {
+          brick.preFX?.addShine(0.16 + (index % 3) * 0.025, 0.22, 2.4, false);
+        }
       }
     }
 
-    this.spawnBall(this.paddle.x, this.paddle.y - 25, 0, 0);
+    this.spawnBall(this.paddle.x, this.paddle.y - 27, 0, 0);
     this.messageText.setText(`LEVEL ${String(this.level).padStart(2, "0")}  •  SPACE / CLICK TO LAUNCH`).setVisible(true);
     this.refreshHud();
   }
@@ -241,7 +334,7 @@ class GameScene extends Phaser.Scene {
     this.balls.getChildren().forEach((child, i) => {
       const ball = child as Phaser.Physics.Arcade.Image;
       if (ball.body.velocity.lengthSq() === 0) {
-        ball.setPosition(this.paddle.x + (i - (this.balls.countActive(true) - 1) / 2) * 20, this.paddle.y - 24);
+        ball.setPosition(this.paddle.x + (i - (this.balls.countActive(true) - 1) / 2) * 20, this.paddle.y - 27);
       }
     });
   }
@@ -277,7 +370,7 @@ class GameScene extends Phaser.Scene {
     this.flashBrick(brick);
 
     if (data.hp > 0) {
-      brick.setTint(0xd7efff);
+      brick.setTexture("brick-cracked").setTint(0xd7efff);
       this.refreshHud();
       return;
     }
@@ -333,21 +426,35 @@ class GameScene extends Phaser.Scene {
   }
 
   private flashBrick(brick: Phaser.Physics.Arcade.Image) {
-    this.tweens.add({ targets: brick, alpha: 0.35, duration: 45, yoyo: true });
+    this.tweens.add({ targets: brick, alpha: 0.3, scaleX: 0.94, scaleY: 1.08, duration: 50, yoyo: true });
   }
 
   private shatter(x: number, y: number) {
-    for (let i = 0; i < 7; i++) {
-      const shard = this.add.triangle(x, y, 0, 0, Phaser.Math.Between(5, 12), Phaser.Math.Between(2, 7), Phaser.Math.Between(-5, 0), Phaser.Math.Between(5, 12), 0xd9f1ff, 0.8).setDepth(4);
+    for (let i = 0; i < 10; i++) {
+      const shard = this.add
+        .triangle(
+          x,
+          y,
+          0,
+          0,
+          Phaser.Math.Between(5, 13),
+          Phaser.Math.Between(2, 8),
+          Phaser.Math.Between(-5, 0),
+          Phaser.Math.Between(5, 13),
+          i % 3 === 0 ? 0xffffff : 0xbcecff,
+          Phaser.Math.FloatBetween(0.58, 0.92),
+        )
+        .setDepth(4);
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-      const distance = Phaser.Math.Between(20, 62);
+      const distance = Phaser.Math.Between(22, 70);
       this.tweens.add({
         targets: shard,
         x: x + Math.cos(angle) * distance,
-        y: y + Math.sin(angle) * distance,
-        angle: Phaser.Math.Between(-180, 180),
+        y: y + Math.sin(angle) * distance + Phaser.Math.Between(4, 22),
+        angle: Phaser.Math.Between(-220, 220),
+        scale: Phaser.Math.FloatBetween(0.45, 1.2),
         alpha: 0,
-        duration: Phaser.Math.Between(220, 420),
+        duration: Phaser.Math.Between(260, 500),
         ease: "Quad.easeOut",
         onComplete: () => shard.destroy(),
       });
@@ -393,21 +500,33 @@ class GameScene extends Phaser.Scene {
     } else if (kind === "pea") {
       this.multiplyBalls(3);
     } else if (kind === "carrot") {
-      this.setTimedEffect("carrot", 12000, () => {
-        this.paddleSpeed = 760;
-        this.paddle.setTint(COLORS.red);
-      }, () => {
-        this.paddleSpeed = 520;
-        this.paddle.clearTint();
-      });
+      this.setTimedEffect(
+        "carrot",
+        12000,
+        () => {
+          this.paddleSpeed = 760;
+          this.paddle.setTint(COLORS.red);
+        },
+        () => {
+          this.paddleSpeed = 520;
+          this.paddle.clearTint();
+        },
+      );
     } else if (kind === "broccoli") {
-      this.setTimedEffect("broccoli", 12000, () => {
-        this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, 22);
-        this.paddle.setTint(COLORS.green);
-      }, () => {
-        this.paddle.setDisplaySize(this.basePaddleWidth, 22);
-        this.paddle.clearTint();
-      });
+      this.setTimedEffect(
+        "broccoli",
+        12000,
+        () => {
+          this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, 24);
+          this.paddle.setTint(COLORS.green);
+          this.movePaddle(this.paddle.x);
+        },
+        () => {
+          this.paddle.setDisplaySize(this.basePaddleWidth, 24);
+          this.paddle.clearTint();
+          this.movePaddle(this.paddle.x);
+        },
+      );
     }
 
     this.refreshHud();
@@ -431,21 +550,28 @@ class GameScene extends Phaser.Scene {
   private setTimedEffect(kind: PowerKind, duration: number, start: () => void, end: () => void) {
     this.timedEffects.get(kind)?.remove(false);
     start();
-    this.timedEffects.set(kind, this.time.delayedCall(duration, () => {
-      end();
-      this.timedEffects.delete(kind);
-    }));
+    this.timedEffects.set(
+      kind,
+      this.time.delayedCall(duration, () => {
+        end();
+        this.timedEffects.delete(kind);
+      }),
+    );
   }
 
   private showPowerMessage(text: string) {
-    const label = this.add.text(WIDTH / 2, HEIGHT / 2 + 40, text, {
-      fontFamily: "Arial Black, Arial, sans-serif",
-      fontSize: "36px",
-      color: "#F2C94C",
-      stroke: "#081735",
-      strokeThickness: 8,
-      align: "center",
-    }).setOrigin(0.5).setScale(0.65).setDepth(30);
+    const label = this.add
+      .text(WIDTH / 2, HEIGHT / 2 + 40, text, {
+        fontFamily: "Arial Black, Arial, sans-serif",
+        fontSize: "36px",
+        color: "#F2C94C",
+        stroke: "#081735",
+        strokeThickness: 8,
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setScale(0.65)
+      .setDepth(30);
 
     this.tweens.add({
       targets: label,
@@ -472,7 +598,7 @@ class GameScene extends Phaser.Scene {
       return;
     }
 
-    this.spawnBall(this.paddle.x, this.paddle.y - 25, 0, 0);
+    this.spawnBall(this.paddle.x, this.paddle.y - 27, 0, 0);
     this.messageText.setText("BALL LOST  •  SPACE / CLICK TO LAUNCH").setVisible(true);
   }
 
