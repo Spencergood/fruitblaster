@@ -61,7 +61,6 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    // Static body: player input can move it, collisions cannot.
     this.paddle = this.physics.add.staticImage(WIDTH / 2, PADDLE_Y, "paddle");
 
     this.balls = this.physics.add.group({ allowGravity: false });
@@ -70,7 +69,10 @@ class GameScene extends Phaser.Scene {
     this.embeddedFruits = this.add.group();
 
     this.physics.world.setBoundsCollision(true, true, true, false);
-    this.physics.add.collider(
+
+    // Paddle uses overlap + an explicit bounce instead of Arcade separation.
+    // That avoids the static-body pinning/sticking case entirely.
+    this.physics.add.overlap(
       this.balls,
       this.paddle,
       this.onBallPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
@@ -154,31 +156,23 @@ class GameScene extends Phaser.Scene {
   private createTextures() {
     const g = this.make.graphics({ x: 0, y: 0 });
 
-    // ICE / GLASS BRICK -----------------------------------------------------
-    // Transparent body + dark lower bevel + bright top bevel + inner
-    // refraction. The moving specular highlight is added as WebGL pre-FX.
+    // ICE / GLASS BRICK
     g.fillStyle(0x071b37, 0.42);
     g.fillRoundedRect(2, 4, 69, 26, 6);
-
     g.fillStyle(0x8ed5f7, 0.48);
     g.fillRoundedRect(0, 0, 70, 27, 6);
-
     g.fillStyle(0xdff6ff, 0.34);
     g.fillRoundedRect(4, 4, 62, 19, 4);
-
     g.fillStyle(0xffffff, 0.25);
     g.fillTriangle(4, 4, 66, 4, 61, 9);
     g.fillTriangle(4, 4, 9, 9, 9, 22);
-
     g.fillStyle(0x397faa, 0.22);
     g.fillTriangle(9, 22, 61, 22, 66, 26);
     g.fillTriangle(61, 9, 66, 4, 66, 26);
-
     g.lineStyle(1, 0xffffff, 0.92);
     g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
     g.lineStyle(1, 0xbcecff, 0.6);
     g.strokeRoundedRect(4.5, 4.5, 61, 18, 4);
-
     g.lineStyle(2, 0xffffff, 0.62);
     g.lineBetween(9, 5, 28, 5);
     g.lineStyle(1, 0xffffff, 0.42);
@@ -297,8 +291,10 @@ class GameScene extends Phaser.Scene {
     const startY = 112;
 
     const specials: PowerKind[] = ["pepper", "cherry", "pea", "carrot", "broccoli"];
-    const specialCells = new Set<number>();
-    while (specialCells.size < Math.min(7, rows * cols)) specialCells.add(Phaser.Math.Between(0, rows * cols - 1));
+    const totalCells = rows * cols;
+    // Distributed on purpose so every first level visibly demonstrates power-ups.
+    const preferredCells = [2, 8, 14, 20, 26, 32, 38, 46, 52];
+    const specialCells = new Set(preferredCells.filter((cell) => cell < totalCells));
 
     let specialIndex = 0;
     for (let row = 0; row < rows; row++) {
@@ -314,20 +310,33 @@ class GameScene extends Phaser.Scene {
         if (specialCells.has(index)) {
           data.power = specials[specialIndex % specials.length];
           specialIndex++;
+
+          // Put produce visually above the transparent brick so it reads
+          // immediately, then add a faint glass face over it to keep the
+          // "frozen inside" illusion.
+          const inset = this.add
+            .rectangle(x, y, 39, 24, 0x081735, 0.32)
+            .setStrokeStyle(1, 0xdff6ff, 0.72)
+            .setDepth(2.35);
           const fruit = this.add
             .image(x, y, `fruit-${data.power}`)
-            .setDisplaySize(25, 25)
-            .setAlpha(0.82)
-            .setDepth(1);
-          this.embeddedFruits.add(fruit);
+            .setDisplaySize(30, 30)
+            .setAlpha(1)
+            .setDepth(2.6);
+          const glassFace = this.add
+            .rectangle(x - 3, y - 4, 30, 4, 0xffffff, 0.18)
+            .setAngle(-4)
+            .setDepth(2.8);
+
+          this.embeddedFruits.addMultiple([inset, fruit, glassFace]);
           brick.setData("fruitSprite", fruit);
+          brick.setData("fruitInset", inset);
+          brick.setData("fruitGlass", glassFace);
         }
 
         brick.setData("brickData", data);
         if (hp > 1) brick.setTint(0x8fc9e8);
 
-        // Real WebGL shader pass. We only put it on some bricks so it feels
-        // like light moving across the wall instead of every brick sparkling.
         if (this.game.renderer.type === Phaser.WEBGL && index % 4 === 0) {
           brick.preFX?.addShine(0.16 + (index % 3) * 0.025, 0.22, 2.4, false);
         }
@@ -368,11 +377,16 @@ class GameScene extends Phaser.Scene {
   private onBallPaddle(ballObj: Phaser.GameObjects.GameObject) {
     const ball = ballObj as Phaser.Physics.Arcade.Image;
     const body = this.dynamicBody(ball);
-    if (body.velocity.y < 0) return;
+    if (body.velocity.y <= 0) return;
+
     const offset = Phaser.Math.Clamp((ball.x - this.paddle.x) / (this.paddle.displayWidth / 2), -1, 1);
     const speed = Math.max(430, body.velocity.length());
     const vx = offset * 360;
-    const vy = -Math.sqrt(Math.max(120 * 120, speed * speed - vx * vx));
+    const vy = -Math.sqrt(Math.max(160 * 160, speed * speed - vx * vx));
+
+    // Explicitly lift the ball clear of the overlap before changing direction.
+    // This guarantees the callback cannot immediately re-fire and pin it.
+    ball.setY(this.paddle.y - this.paddle.displayHeight / 2 - ball.displayHeight / 2 - 2);
     ball.setVelocity(vx, vy);
   }
 
@@ -411,7 +425,11 @@ class GameScene extends Phaser.Scene {
     if (!brick.active) return;
     const data = brick.getData("brickData") as BrickData;
     const fruitSprite = brick.getData("fruitSprite") as Phaser.GameObjects.Image | undefined;
-    if (fruitSprite) fruitSprite.destroy();
+    const fruitInset = brick.getData("fruitInset") as Phaser.GameObjects.Rectangle | undefined;
+    const fruitGlass = brick.getData("fruitGlass") as Phaser.GameObjects.Rectangle | undefined;
+    fruitSprite?.destroy();
+    fruitInset?.destroy();
+    fruitGlass?.destroy();
 
     this.shatter(brick.x, brick.y);
     brick.disableBody(true, true);
@@ -480,9 +498,9 @@ class GameScene extends Phaser.Scene {
 
   private spawnDrop(x: number, y: number, kind: PowerKind) {
     const drop = this.drops.create(x, y, `fruit-${kind}`) as Phaser.Physics.Arcade.Image;
-    drop.setDisplaySize(44, 44).setData("kind", kind).setVelocityY(155).setDepth(8);
-    const halo = this.add.circle(x, y, 27, COLORS.cream, 0.12).setDepth(7);
-    this.tweens.add({ targets: halo, scale: 1.4, alpha: 0, duration: 650, repeat: -1 });
+    drop.setDisplaySize(48, 48).setData("kind", kind).setVelocityY(155).setDepth(8);
+    const halo = this.add.circle(x, y, 30, COLORS.cream, 0.18).setDepth(7);
+    this.tweens.add({ targets: halo, scale: 1.45, alpha: 0, duration: 650, repeat: -1 });
     drop.setData("halo", halo);
   }
 
