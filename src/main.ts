@@ -61,9 +61,7 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    // The paddle is intentionally a STATIC Arcade body. It can still be moved
-    // by us, but the collision solver can never kick it upward or shove it
-    // around when a ball hits it. Every manual move refreshes the static body.
+    // Static body: player input can move it, collisions cannot.
     this.paddle = this.physics.add.staticImage(WIDTH / 2, PADDLE_Y, "paddle");
 
     this.balls = this.physics.add.group({ allowGravity: false });
@@ -72,9 +70,27 @@ class GameScene extends Phaser.Scene {
     this.embeddedFruits = this.add.group();
 
     this.physics.world.setBoundsCollision(true, true, true, false);
-    this.physics.add.collider(this.balls, this.paddle, this.onBallPaddle, undefined, this);
-    this.physics.add.collider(this.balls, this.bricks, this.onBallBrick, undefined, this);
-    this.physics.add.overlap(this.paddle, this.drops, this.onCatchDrop, undefined, this);
+    this.physics.add.collider(
+      this.balls,
+      this.paddle,
+      this.onBallPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      undefined,
+      this,
+    );
+    this.physics.add.collider(
+      this.balls,
+      this.bricks,
+      this.onBallBrick as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      undefined,
+      this,
+    );
+    this.physics.add.overlap(
+      this.paddle,
+      this.drops,
+      this.onCatchDrop as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
+      undefined,
+      this,
+    );
 
     this.cursors = this.input.keyboard!.createCursorKeys();
     this.keys = this.input.keyboard!.addKeys("A,D,SPACE,R") as Record<string, Phaser.Input.Keyboard.Key>;
@@ -125,6 +141,10 @@ class GameScene extends Phaser.Scene {
     if (this.launched && this.balls.countActive(true) === 0) this.loseLife();
   }
 
+  private dynamicBody(image: Phaser.Physics.Arcade.Image) {
+    return image.body as Phaser.Physics.Arcade.Body;
+  }
+
   private movePaddle(x: number) {
     const half = this.paddle.displayWidth / 2;
     this.paddle.setPosition(Phaser.Math.Clamp(x, half + 12, WIDTH - half - 12), PADDLE_Y);
@@ -132,12 +152,11 @@ class GameScene extends Phaser.Scene {
   }
 
   private createTextures() {
-    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    const g = this.make.graphics({ x: 0, y: 0 });
 
     // ICE / GLASS BRICK -----------------------------------------------------
-    // A deliberately overbuilt tiny texture: transparent body, darker lower
-    // bevel, bright upper bevel, internal blue refraction and hard highlights.
-    // The WebGL shine pass added later is only the moving specular layer.
+    // Transparent body + dark lower bevel + bright top bevel + inner
+    // refraction. The moving specular highlight is added as WebGL pre-FX.
     g.fillStyle(0x071b37, 0.42);
     g.fillRoundedRect(2, 4, 69, 26, 6);
 
@@ -168,7 +187,7 @@ class GameScene extends Phaser.Scene {
     g.generateTexture("brick", 72, 30);
     g.clear();
 
-    // Cracked ice texture used after the first hit on reinforced blocks.
+    // Reinforced blocks become visibly cracked after their first hit.
     g.fillStyle(0x071b37, 0.42);
     g.fillRoundedRect(2, 4, 69, 26, 6);
     g.fillStyle(0x8ed5f7, 0.48);
@@ -200,7 +219,6 @@ class GameScene extends Phaser.Scene {
     g.generateTexture("brick-cracked", 72, 30);
     g.clear();
 
-    // Paddle keeps the same icy material language, but much thicker.
     g.fillStyle(0x06172e, 0.55);
     g.fillRoundedRect(2, 4, this.basePaddleWidth - 2, 19, 9);
     g.fillStyle(0x9fddf8, 0.78);
@@ -308,9 +326,8 @@ class GameScene extends Phaser.Scene {
         brick.setData("brickData", data);
         if (hp > 1) brick.setTint(0x8fc9e8);
 
-        // Phaser's built-in Shine is a real WebGL pre-FX shader. A subset of
-        // blocks gets it so the wall catches moving highlights without running
-        // dozens of expensive shader passes on every frame.
+        // Real WebGL shader pass. We only put it on some bricks so it feels
+        // like light moving across the wall instead of every brick sparkling.
         if (this.game.renderer.type === Phaser.WEBGL && index % 4 === 0) {
           brick.preFX?.addShine(0.16 + (index % 3) * 0.025, 0.22, 2.4, false);
         }
@@ -325,7 +342,6 @@ class GameScene extends Phaser.Scene {
   private spawnBall(x: number, y: number, vx: number, vy: number) {
     const ball = this.balls.create(x, y, "ball") as Phaser.Physics.Arcade.Image;
     ball.setCircle(9).setCollideWorldBounds(true).setBounce(1, 1);
-    ball.body.setAllowGravity(false);
     ball.setVelocity(vx, vy);
     return ball;
   }
@@ -333,7 +349,7 @@ class GameScene extends Phaser.Scene {
   private attachUnlaunchedBalls() {
     this.balls.getChildren().forEach((child, i) => {
       const ball = child as Phaser.Physics.Arcade.Image;
-      if (ball.body.velocity.lengthSq() === 0) {
+      if (this.dynamicBody(ball).velocity.lengthSq() === 0) {
         ball.setPosition(this.paddle.x + (i - (this.balls.countActive(true) - 1) / 2) * 20, this.paddle.y - 27);
       }
     });
@@ -351,9 +367,10 @@ class GameScene extends Phaser.Scene {
 
   private onBallPaddle(ballObj: Phaser.GameObjects.GameObject) {
     const ball = ballObj as Phaser.Physics.Arcade.Image;
-    if (ball.body.velocity.y < 0) return;
+    const body = this.dynamicBody(ball);
+    if (body.velocity.y < 0) return;
     const offset = Phaser.Math.Clamp((ball.x - this.paddle.x) / (this.paddle.displayWidth / 2), -1, 1);
-    const speed = Math.max(430, ball.body.velocity.length());
+    const speed = Math.max(430, body.velocity.length());
     const vx = offset * 360;
     const vy = -Math.sqrt(Math.max(120 * 120, speed * speed - vx * vx));
     ball.setVelocity(vx, vy);
@@ -464,7 +481,6 @@ class GameScene extends Phaser.Scene {
   private spawnDrop(x: number, y: number, kind: PowerKind) {
     const drop = this.drops.create(x, y, `fruit-${kind}`) as Phaser.Physics.Arcade.Image;
     drop.setDisplaySize(44, 44).setData("kind", kind).setVelocityY(155).setDepth(8);
-    drop.body.setAllowGravity(false);
     const halo = this.add.circle(x, y, 27, COLORS.cream, 0.12).setDepth(7);
     this.tweens.add({ targets: halo, scale: 1.4, alpha: 0, duration: 650, repeat: -1 });
     drop.setData("halo", halo);
@@ -535,7 +551,7 @@ class GameScene extends Phaser.Scene {
   private multiplyBalls(countPerBall: number) {
     const existing = this.balls.getChildren().slice() as Phaser.Physics.Arcade.Image[];
     existing.forEach((ball) => {
-      const velocity = ball.body.velocity.clone();
+      const velocity = this.dynamicBody(ball).velocity.clone();
       const speed = Math.max(430, velocity.length());
       const baseAngle = velocity.angle();
       for (let i = 1; i < countPerBall; i++) {
