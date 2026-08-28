@@ -3,6 +3,7 @@ import Phaser from "phaser";
 const WIDTH = 960;
 const HEIGHT = 640;
 const PADDLE_Y = HEIGHT - 54;
+
 const COLORS = {
   ink: 0x081735,
   blue: 0x143d88,
@@ -10,8 +11,6 @@ const COLORS = {
   yellow: 0xf2c94c,
   red: 0xe4573d,
   green: 0x3f6949,
-  plum: 0x493044,
-  glass: 0xbfe7ff,
 };
 
 type PowerKind = "pepper" | "cherry" | "pea" | "carrot" | "broccoli";
@@ -27,18 +26,23 @@ class GameScene extends Phaser.Scene {
   private bricks!: Phaser.Physics.Arcade.StaticGroup;
   private drops!: Phaser.Physics.Arcade.Group;
   private embeddedFruits!: Phaser.GameObjects.Group;
+
   private scoreText!: Phaser.GameObjects.Text;
   private livesText!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
+
   private score = 0;
   private lives = 3;
   private level = 1;
   private launched = false;
   private gameOver = false;
   private explosiveHits = 0;
+
   private paddleSpeed = 520;
-  private basePaddleWidth = 132;
+  private readonly basePaddleWidth = 132;
+  private readonly paddleHeight = 24;
+
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
   private timedEffects = new Map<PowerKind, Phaser.Time.TimerEvent>();
@@ -61,7 +65,15 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    this.paddle = this.physics.add.staticImage(WIDTH / 2, PADDLE_Y, "paddle");
+    // Standard Breakout/Pong paddle physics: a normal dynamic Arcade body
+    // that is immovable. The collision solver separates/bounces the ball;
+    // collisions are never responsible for moving the paddle.
+    this.paddle = this.physics.add.image(WIDTH / 2, PADDLE_Y, "paddle");
+    this.paddle.setImmovable(true);
+    this.paddle.setPushable(false);
+    this.paddle.setCollideWorldBounds(true);
+    this.dynamicBody(this.paddle).allowGravity = false;
+    this.syncPaddleBody();
 
     this.balls = this.physics.add.group({ allowGravity: false });
     this.drops = this.physics.add.group({ allowGravity: false });
@@ -70,15 +82,14 @@ class GameScene extends Phaser.Scene {
 
     this.physics.world.setBoundsCollision(true, true, true, false);
 
-    // Paddle uses overlap + an explicit bounce instead of Arcade separation.
-    // That avoids the static-body pinning/sticking case entirely.
-    this.physics.add.overlap(
+    this.physics.add.collider(
       this.balls,
       this.paddle,
       this.onBallPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
-      undefined,
+      this.canBallHitPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
       this,
     );
+
     this.physics.add.collider(
       this.balls,
       this.bricks,
@@ -86,6 +97,7 @@ class GameScene extends Phaser.Scene {
       undefined,
       this,
     );
+
     this.physics.add.overlap(
       this.paddle,
       this.drops,
@@ -123,6 +135,14 @@ class GameScene extends Phaser.Scene {
       if (!this.launched) this.attachUnlaunchedBalls();
     }
 
+    // Hard invariant: the paddle only has an X coordinate controlled by the
+    // player. Its Y position can never drift because of physics.
+    if (this.paddle.y !== PADDLE_Y) {
+      this.paddle.y = PADDLE_Y;
+      this.dynamicBody(this.paddle).updateFromGameObject();
+    }
+    this.dynamicBody(this.paddle).setVelocity(0, 0);
+
     if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) this.launch();
 
     this.balls.getChildren().forEach((child) => {
@@ -149,31 +169,46 @@ class GameScene extends Phaser.Scene {
 
   private movePaddle(x: number) {
     const half = this.paddle.displayWidth / 2;
-    this.paddle.setPosition(Phaser.Math.Clamp(x, half + 12, WIDTH - half - 12), PADDLE_Y);
-    this.paddle.refreshBody();
+    this.paddle.x = Phaser.Math.Clamp(x, half + 12, WIDTH - half - 12);
+    this.paddle.y = PADDLE_Y;
+    this.dynamicBody(this.paddle).updateFromGameObject();
+  }
+
+  private syncPaddleBody() {
+    const body = this.dynamicBody(this.paddle);
+    body.setSize(this.paddle.displayWidth, this.paddleHeight, true);
+    body.updateFromGameObject();
   }
 
   private createTextures() {
     const g = this.make.graphics({ x: 0, y: 0 });
 
-    // ICE / GLASS BRICK
-    g.fillStyle(0x071b37, 0.42);
-    g.fillRoundedRect(2, 4, 69, 26, 6);
-    g.fillStyle(0x8ed5f7, 0.48);
+    // ICE / GLASS BRICK -----------------------------------------------------
+    g.fillStyle(0x06172e, 0.52);
+    g.fillRoundedRect(2, 5, 69, 25, 6);
+
+    g.fillStyle(0x78c9ef, 0.52);
     g.fillRoundedRect(0, 0, 70, 27, 6);
-    g.fillStyle(0xdff6ff, 0.34);
+
+    g.fillStyle(0xdff7ff, 0.34);
     g.fillRoundedRect(4, 4, 62, 19, 4);
-    g.fillStyle(0xffffff, 0.25);
+
+    // Bright bevels.
+    g.fillStyle(0xffffff, 0.34);
     g.fillTriangle(4, 4, 66, 4, 61, 9);
     g.fillTriangle(4, 4, 9, 9, 9, 22);
-    g.fillStyle(0x397faa, 0.22);
+
+    // Deep bevels.
+    g.fillStyle(0x25658f, 0.27);
     g.fillTriangle(9, 22, 61, 22, 66, 26);
     g.fillTriangle(61, 9, 66, 4, 66, 26);
+
+    // Internal ice/refraction marks.
     g.lineStyle(1, 0xffffff, 0.92);
     g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
-    g.lineStyle(1, 0xbcecff, 0.6);
+    g.lineStyle(1, 0xbcecff, 0.64);
     g.strokeRoundedRect(4.5, 4.5, 61, 18, 4);
-    g.lineStyle(2, 0xffffff, 0.62);
+    g.lineStyle(2, 0xffffff, 0.68);
     g.lineBetween(9, 5, 28, 5);
     g.lineStyle(1, 0xffffff, 0.42);
     g.lineBetween(46, 8, 61, 12);
@@ -181,53 +216,55 @@ class GameScene extends Phaser.Scene {
     g.generateTexture("brick", 72, 30);
     g.clear();
 
-    // Reinforced blocks become visibly cracked after their first hit.
-    g.fillStyle(0x071b37, 0.42);
-    g.fillRoundedRect(2, 4, 69, 26, 6);
-    g.fillStyle(0x8ed5f7, 0.48);
+    // CRACKED ICE -----------------------------------------------------------
+    g.fillStyle(0x06172e, 0.52);
+    g.fillRoundedRect(2, 5, 69, 25, 6);
+    g.fillStyle(0x78c9ef, 0.52);
     g.fillRoundedRect(0, 0, 70, 27, 6);
-    g.fillStyle(0xdff6ff, 0.34);
+    g.fillStyle(0xdff7ff, 0.34);
     g.fillRoundedRect(4, 4, 62, 19, 4);
-    g.fillStyle(0xffffff, 0.25);
+    g.fillStyle(0xffffff, 0.34);
     g.fillTriangle(4, 4, 66, 4, 61, 9);
     g.fillTriangle(4, 4, 9, 9, 9, 22);
-    g.fillStyle(0x397faa, 0.22);
+    g.fillStyle(0x25658f, 0.27);
     g.fillTriangle(9, 22, 61, 22, 66, 26);
     g.fillTriangle(61, 9, 66, 4, 66, 26);
     g.lineStyle(1, 0xffffff, 0.92);
     g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
-    g.lineStyle(1.4, 0xeafaff, 0.86);
+    g.lineStyle(1.4, 0xeafaff, 0.92);
     g.beginPath();
-    g.moveTo(35, 3);
-    g.lineTo(32, 10);
+    g.moveTo(35, 2);
+    g.lineTo(32, 9);
     g.lineTo(38, 14);
     g.lineTo(33, 21);
-    g.lineTo(35, 27);
-    g.moveTo(32, 10);
+    g.lineTo(35, 28);
+    g.moveTo(32, 9);
     g.lineTo(24, 13);
-    g.lineTo(18, 20);
+    g.lineTo(18, 21);
     g.moveTo(38, 14);
-    g.lineTo(48, 11);
-    g.lineTo(56, 15);
+    g.lineTo(48, 10);
+    g.lineTo(57, 15);
     g.strokePath();
     g.generateTexture("brick-cracked", 72, 30);
     g.clear();
 
-    g.fillStyle(0x06172e, 0.55);
+    // PADDLE ---------------------------------------------------------------
+    g.fillStyle(0x06172e, 0.62);
     g.fillRoundedRect(2, 4, this.basePaddleWidth - 2, 19, 9);
-    g.fillStyle(0x9fddf8, 0.78);
+    g.fillStyle(0x91d7f6, 0.9);
     g.fillRoundedRect(0, 0, this.basePaddleWidth, 20, 9);
     g.fillStyle(0xeaf8ff, 0.45);
     g.fillRoundedRect(5, 3, this.basePaddleWidth - 10, 11, 6);
     g.fillStyle(COLORS.blue, 0.95);
     g.fillRoundedRect(18, 8, this.basePaddleWidth - 36, 7, 4);
-    g.lineStyle(2, 0xffffff, 0.88);
+    g.lineStyle(2, 0xffffff, 0.9);
     g.lineBetween(9, 3, 54, 3);
-    g.lineStyle(1, 0xffffff, 0.75);
+    g.lineStyle(1, 0xffffff, 0.78);
     g.strokeRoundedRect(0.5, 0.5, this.basePaddleWidth - 1, 19, 9);
-    g.generateTexture("paddle", this.basePaddleWidth, 24);
+    g.generateTexture("paddle", this.basePaddleWidth, this.paddleHeight);
     g.clear();
 
+    // BALL -----------------------------------------------------------------
     g.fillStyle(0xffffff, 1);
     g.fillCircle(9, 9, 8);
     g.lineStyle(2, 0x9fdcff, 0.9);
@@ -273,6 +310,7 @@ class GameScene extends Phaser.Scene {
   private startLevel() {
     this.bricks.clear(true, true);
     this.balls.clear(true, true);
+
     this.drops.getChildren().forEach((child) => {
       const drop = child as Phaser.Physics.Arcade.Image;
       const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
@@ -291,19 +329,21 @@ class GameScene extends Phaser.Scene {
     const startY = 112;
 
     const specials: PowerKind[] = ["pepper", "cherry", "pea", "carrot", "broccoli"];
-    const totalCells = rows * cols;
-    // Distributed on purpose so every first level visibly demonstrates power-ups.
     const preferredCells = [2, 8, 14, 20, 26, 32, 38, 46, 52];
+    const totalCells = rows * cols;
     const specialCells = new Set(preferredCells.filter((cell) => cell < totalCells));
 
     let specialIndex = 0;
+
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const index = row * cols + col;
         const x = startX + col * (brickW + gap);
         const y = startY + row * 40;
+
         const brick = this.bricks.create(x, y, "brick") as Phaser.Physics.Arcade.Image;
         brick.setDepth(2);
+
         const hp = this.level >= 3 && row < 2 ? 2 : 1;
         const data: BrickData = { hp };
 
@@ -311,27 +351,29 @@ class GameScene extends Phaser.Scene {
           data.power = specials[specialIndex % specials.length];
           specialIndex++;
 
-          // Put produce visually above the transparent brick so it reads
-          // immediately, then add a faint glass face over it to keep the
-          // "frozen inside" illusion.
+          // Fruit is intentionally rendered above the base ice texture so it
+          // is unmistakable, with a small glass glint above it to keep the
+          // impression that it is suspended inside the brick.
           const inset = this.add
-            .rectangle(x, y, 39, 24, 0x081735, 0.32)
-            .setStrokeStyle(1, 0xdff6ff, 0.72)
-            .setDepth(2.35);
+            .rectangle(x, y, 40, 25, 0x06172e, 0.38)
+            .setStrokeStyle(1, 0xdff6ff, 0.8)
+            .setDepth(2.25);
+
           const fruit = this.add
             .image(x, y, `fruit-${data.power}`)
-            .setDisplaySize(30, 30)
+            .setDisplaySize(31, 31)
             .setAlpha(1)
-            .setDepth(2.6);
-          const glassFace = this.add
-            .rectangle(x - 3, y - 4, 30, 4, 0xffffff, 0.18)
-            .setAngle(-4)
-            .setDepth(2.8);
+            .setDepth(2.65);
 
-          this.embeddedFruits.addMultiple([inset, fruit, glassFace]);
+          const glassGlint = this.add
+            .rectangle(x - 5, y - 7, 27, 3, 0xffffff, 0.28)
+            .setAngle(-5)
+            .setDepth(2.9);
+
+          this.embeddedFruits.addMultiple([inset, fruit, glassGlint]);
           brick.setData("fruitSprite", fruit);
           brick.setData("fruitInset", inset);
-          brick.setData("fruitGlass", glassFace);
+          brick.setData("fruitGlass", glassGlint);
         }
 
         brick.setData("brickData", data);
@@ -343,50 +385,69 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    this.spawnBall(this.paddle.x, this.paddle.y - 27, 0, 0);
-    this.messageText.setText(`LEVEL ${String(this.level).padStart(2, "0")}  •  SPACE / CLICK TO LAUNCH`).setVisible(true);
+    this.spawnBall(this.paddle.x, PADDLE_Y - 28, 0, 0);
+    this.messageText
+      .setText(`LEVEL ${String(this.level).padStart(2, "0")}  •  SPACE / CLICK TO LAUNCH`)
+      .setVisible(true);
     this.refreshHud();
   }
 
   private spawnBall(x: number, y: number, vx: number, vy: number) {
     const ball = this.balls.create(x, y, "ball") as Phaser.Physics.Arcade.Image;
-    ball.setCircle(9).setCollideWorldBounds(true).setBounce(1, 1);
+    ball.setCircle(9);
+    ball.setCollideWorldBounds(true);
+    ball.setBounce(1, 1);
+    this.dynamicBody(ball).allowGravity = false;
     ball.setVelocity(vx, vy);
     return ball;
   }
 
   private attachUnlaunchedBalls() {
+    const count = this.balls.countActive(true);
     this.balls.getChildren().forEach((child, i) => {
       const ball = child as Phaser.Physics.Arcade.Image;
       if (this.dynamicBody(ball).velocity.lengthSq() === 0) {
-        ball.setPosition(this.paddle.x + (i - (this.balls.countActive(true) - 1) / 2) * 20, this.paddle.y - 27);
+        ball.setPosition(this.paddle.x + (i - (count - 1) / 2) * 20, PADDLE_Y - 28);
+        this.dynamicBody(ball).updateFromGameObject();
       }
     });
   }
 
   private launch() {
     if (this.gameOver || this.launched) return;
+
     this.launched = true;
     this.messageText.setVisible(false);
+
     this.balls.getChildren().forEach((child, index) => {
       const ball = child as Phaser.Physics.Arcade.Image;
       ball.setVelocity(index % 2 === 0 ? 245 : -245, -360);
     });
   }
 
+  private canBallHitPaddle(ballObj: Phaser.GameObjects.GameObject) {
+    const ball = ballObj as Phaser.Physics.Arcade.Image;
+    const body = this.dynamicBody(ball);
+
+    // One-way Pong paddle: only a descending ball whose center is above the
+    // paddle may collide. A missed ball below the paddle is allowed to fall.
+    return body.velocity.y > 0 && ball.y < this.paddle.y;
+  }
+
   private onBallPaddle(ballObj: Phaser.GameObjects.GameObject) {
     const ball = ballObj as Phaser.Physics.Arcade.Image;
     const body = this.dynamicBody(ball);
-    if (body.velocity.y <= 0) return;
 
-    const offset = Phaser.Math.Clamp((ball.x - this.paddle.x) / (this.paddle.displayWidth / 2), -1, 1);
-    const speed = Math.max(430, body.velocity.length());
-    const vx = offset * 360;
-    const vy = -Math.sqrt(Math.max(160 * 160, speed * speed - vx * vx));
+    // Phaser has already separated the bodies at this point. We only choose
+    // the rebound angle; we do not move either object manually.
+    const relative = (ball.x - this.paddle.x) / (this.paddle.displayWidth / 2);
+    const offset = Phaser.Math.Clamp(relative, -1, 1);
+    const speed = Phaser.Math.Clamp(Math.max(440, body.velocity.length()), 440, 560);
 
-    // Explicitly lift the ball clear of the overlap before changing direction.
-    // This guarantees the callback cannot immediately re-fire and pin it.
-    ball.setY(this.paddle.y - this.paddle.displayHeight / 2 - ball.displayHeight / 2 - 2);
+    // Edge hits travel more sideways; center hits travel mostly upward.
+    const vx = offset * speed * 0.82;
+    const vy = -Math.sqrt(Math.max(190 * 190, speed * speed - vx * vx));
+
     ball.setVelocity(vx, vy);
   }
 
@@ -415,6 +476,7 @@ class GameScene extends Phaser.Scene {
     }
 
     this.refreshHud();
+
     if (this.bricks.countActive(true) === 0) {
       this.level += 1;
       this.time.delayedCall(700, () => this.startLevel());
@@ -423,10 +485,12 @@ class GameScene extends Phaser.Scene {
 
   private breakBrick(brick: Phaser.Physics.Arcade.Image, canDrop: boolean) {
     if (!brick.active) return;
+
     const data = brick.getData("brickData") as BrickData;
     const fruitSprite = brick.getData("fruitSprite") as Phaser.GameObjects.Image | undefined;
     const fruitInset = brick.getData("fruitInset") as Phaser.GameObjects.Rectangle | undefined;
     const fruitGlass = brick.getData("fruitGlass") as Phaser.GameObjects.Rectangle | undefined;
+
     fruitSprite?.destroy();
     fruitInset?.destroy();
     fruitGlass?.destroy();
@@ -440,6 +504,7 @@ class GameScene extends Phaser.Scene {
 
   private explodeAt(x: number, y: number) {
     this.cameras.main.shake(90, 0.004);
+
     const ring = this.add.circle(x, y, 10, COLORS.red, 0.28).setDepth(6);
     this.tweens.add({
       targets: ring,
@@ -461,7 +526,14 @@ class GameScene extends Phaser.Scene {
   }
 
   private flashBrick(brick: Phaser.Physics.Arcade.Image) {
-    this.tweens.add({ targets: brick, alpha: 0.3, scaleX: 0.94, scaleY: 1.08, duration: 50, yoyo: true });
+    this.tweens.add({
+      targets: brick,
+      alpha: 0.3,
+      scaleX: 0.95,
+      scaleY: 1.07,
+      duration: 48,
+      yoyo: true,
+    });
   }
 
   private shatter(x: number, y: number) {
@@ -480,8 +552,10 @@ class GameScene extends Phaser.Scene {
           Phaser.Math.FloatBetween(0.58, 0.92),
         )
         .setDepth(4);
+
       const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
       const distance = Phaser.Math.Between(22, 70);
+
       this.tweens.add({
         targets: shard,
         x: x + Math.cos(angle) * distance,
@@ -498,7 +572,12 @@ class GameScene extends Phaser.Scene {
 
   private spawnDrop(x: number, y: number, kind: PowerKind) {
     const drop = this.drops.create(x, y, `fruit-${kind}`) as Phaser.Physics.Arcade.Image;
-    drop.setDisplaySize(48, 48).setData("kind", kind).setVelocityY(155).setDepth(8);
+    drop.setDisplaySize(48, 48);
+    drop.setData("kind", kind);
+    drop.setVelocityY(155);
+    drop.setDepth(8);
+    this.dynamicBody(drop).allowGravity = false;
+
     const halo = this.add.circle(x, y, 30, COLORS.cream, 0.18).setDepth(7);
     this.tweens.add({ targets: halo, scale: 1.45, alpha: 0, duration: 650, repeat: -1 });
     drop.setData("halo", halo);
@@ -507,6 +586,7 @@ class GameScene extends Phaser.Scene {
   private onCatchDrop(_: Phaser.GameObjects.GameObject, dropObj: Phaser.GameObjects.GameObject) {
     const drop = dropObj as Phaser.Physics.Arcade.Image;
     if (!drop.active) return;
+
     const kind = drop.getData("kind") as PowerKind;
     const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
     halo?.destroy();
@@ -528,7 +608,9 @@ class GameScene extends Phaser.Scene {
 
     if (kind === "pepper") {
       this.explosiveHits = 3;
-      this.balls.getChildren().forEach((b) => (b as Phaser.Physics.Arcade.Image).setTint(COLORS.red));
+      this.balls.getChildren().forEach((child) => {
+        (child as Phaser.Physics.Arcade.Image).setTint(COLORS.red);
+      });
     } else if (kind === "cherry") {
       this.multiplyBalls(2);
     } else if (kind === "pea") {
@@ -551,13 +633,15 @@ class GameScene extends Phaser.Scene {
         "broccoli",
         12000,
         () => {
-          this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, 24);
+          this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, this.paddleHeight);
           this.paddle.setTint(COLORS.green);
+          this.syncPaddleBody();
           this.movePaddle(this.paddle.x);
         },
         () => {
-          this.paddle.setDisplaySize(this.basePaddleWidth, 24);
+          this.paddle.setDisplaySize(this.basePaddleWidth, this.paddleHeight);
           this.paddle.clearTint();
+          this.syncPaddleBody();
           this.movePaddle(this.paddle.x);
         },
       );
@@ -568,22 +652,26 @@ class GameScene extends Phaser.Scene {
 
   private multiplyBalls(countPerBall: number) {
     const existing = this.balls.getChildren().slice() as Phaser.Physics.Arcade.Image[];
+
     existing.forEach((ball) => {
       const velocity = this.dynamicBody(ball).velocity.clone();
-      const speed = Math.max(430, velocity.length());
+      const speed = Math.max(440, velocity.length());
       const baseAngle = velocity.angle();
+
       for (let i = 1; i < countPerBall; i++) {
         const spread = Phaser.Math.DegToRad(i % 2 === 0 ? 17 : -17) * Math.ceil(i / 2);
         const angle = baseAngle + spread;
         this.spawnBall(ball.x, ball.y, Math.cos(angle) * speed, Math.sin(angle) * speed);
       }
     });
+
     this.launched = true;
   }
 
   private setTimedEffect(kind: PowerKind, duration: number, start: () => void, end: () => void) {
     this.timedEffects.get(kind)?.remove(false);
     start();
+
     this.timedEffects.set(
       kind,
       this.time.delayedCall(duration, () => {
@@ -632,7 +720,7 @@ class GameScene extends Phaser.Scene {
       return;
     }
 
-    this.spawnBall(this.paddle.x, this.paddle.y - 27, 0, 0);
+    this.spawnBall(this.paddle.x, PADDLE_Y - 28, 0, 0);
     this.messageText.setText("BALL LOST  •  SPACE / CLICK TO LAUNCH").setVisible(true);
   }
 
