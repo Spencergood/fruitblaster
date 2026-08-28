@@ -3,6 +3,7 @@ import Phaser from "phaser";
 const WIDTH = 960;
 const HEIGHT = 640;
 const PADDLE_Y = HEIGHT - 54;
+const BALL_RADIUS = 9;
 
 const COLORS = {
   ink: 0x081735,
@@ -21,7 +22,7 @@ type BrickData = {
 };
 
 class GameScene extends Phaser.Scene {
-  private paddle!: Phaser.Physics.Arcade.Image;
+  private paddle!: Phaser.GameObjects.Image;
   private balls!: Phaser.Physics.Arcade.Group;
   private bricks!: Phaser.Physics.Arcade.StaticGroup;
   private drops!: Phaser.Physics.Arcade.Group;
@@ -65,15 +66,9 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    // Standard Breakout/Pong paddle physics: a normal dynamic Arcade body
-    // that is immovable. The collision solver separates/bounces the ball;
-    // collisions are never responsible for moving the paddle.
-    this.paddle = this.physics.add.image(WIDTH / 2, PADDLE_Y, "paddle");
-    this.paddle.setImmovable(true);
-    this.paddle.setPushable(false);
-    this.paddle.setCollideWorldBounds(true);
-    this.dynamicBody(this.paddle).allowGravity = false;
-    this.syncPaddleBody();
+    // Deliberately NOT a physics object. The paddle is just geometry.
+    // This makes ball contact deterministic and immune to Arcade body sync.
+    this.paddle = this.add.image(WIDTH / 2, PADDLE_Y, "paddle").setDepth(6);
 
     this.balls = this.physics.add.group({ allowGravity: false });
     this.drops = this.physics.add.group({ allowGravity: false });
@@ -82,26 +77,11 @@ class GameScene extends Phaser.Scene {
 
     this.physics.world.setBoundsCollision(true, true, true, false);
 
-    this.physics.add.collider(
-      this.balls,
-      this.paddle,
-      this.onBallPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
-      this.canBallHitPaddle as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
-      this,
-    );
-
+    // Phaser still handles walls and bricks. Paddle contact is manual below.
     this.physics.add.collider(
       this.balls,
       this.bricks,
       this.onBallBrick as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
-      undefined,
-      this,
-    );
-
-    this.physics.add.overlap(
-      this.paddle,
-      this.drops,
-      this.onCatchDrop as Phaser.Types.Physics.Arcade.ArcadePhysicsCallback,
       undefined,
       this,
     );
@@ -135,25 +115,41 @@ class GameScene extends Phaser.Scene {
       if (!this.launched) this.attachUnlaunchedBalls();
     }
 
-    // Hard invariant: the paddle only has an X coordinate controlled by the
-    // player. Its Y position can never drift because of physics.
-    if (this.paddle.y !== PADDLE_Y) {
-      this.paddle.y = PADDLE_Y;
-      this.dynamicBody(this.paddle).updateFromGameObject();
-    }
-    this.dynamicBody(this.paddle).setVelocity(0, 0);
-
     if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) this.launch();
 
+    // Swept collision: compare each ball's previous position to its current
+    // position and detect whether that segment crossed the paddle top plane.
+    // A fast ball cannot tunnel through this because it need not occupy the
+    // same pixels as the paddle on any individual frame.
     this.balls.getChildren().forEach((child) => {
       const ball = child as Phaser.Physics.Arcade.Image;
-      if (ball.y > HEIGHT + 30) ball.destroy();
+      if (!ball.active) return;
+
+      if (this.launched) this.handlePaddleSweep(ball);
+
+      if (ball.y > HEIGHT + 30) {
+        ball.destroy();
+        return;
+      }
+
+      ball.setData("prevX", ball.x);
+      ball.setData("prevY", ball.y);
     });
 
+    // Power-up pickup is also plain rectangle geometry; no paddle body.
+    const paddleBounds = this.paddle.getBounds();
     this.drops.getChildren().forEach((child) => {
       const drop = child as Phaser.Physics.Arcade.Image;
+      if (!drop.active) return;
+
       const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
       halo?.setPosition(drop.x, drop.y);
+
+      if (Phaser.Geom.Intersects.RectangleToRectangle(paddleBounds, drop.getBounds())) {
+        this.catchDrop(drop);
+        return;
+      }
+
       if (drop.y > HEIGHT + 40) {
         halo?.destroy();
         drop.destroy();
@@ -171,13 +167,56 @@ class GameScene extends Phaser.Scene {
     const half = this.paddle.displayWidth / 2;
     this.paddle.x = Phaser.Math.Clamp(x, half + 12, WIDTH - half - 12);
     this.paddle.y = PADDLE_Y;
-    this.dynamicBody(this.paddle).updateFromGameObject();
   }
 
-  private syncPaddleBody() {
-    const body = this.dynamicBody(this.paddle);
-    body.setSize(this.paddle.displayWidth, this.paddleHeight, true);
+  private handlePaddleSweep(ball: Phaser.Physics.Arcade.Image) {
+    const body = this.dynamicBody(ball);
+    if (body.velocity.y <= 0) return;
+
+    const prevX = (ball.getData("prevX") as number | undefined) ?? ball.x;
+    const prevY = (ball.getData("prevY") as number | undefined) ?? ball.y;
+
+    const paddleTop = this.paddle.y - this.paddle.displayHeight / 2;
+    const prevBottom = prevY + BALL_RADIUS;
+    const currentBottom = ball.y + BALL_RADIUS;
+
+    // The ball's lower edge crossed the paddle's top edge this frame.
+    if (prevBottom > paddleTop || currentBottom < paddleTop) return;
+
+    const travel = currentBottom - prevBottom;
+    const t = travel > 0 ? Phaser.Math.Clamp((paddleTop - prevBottom) / travel, 0, 1) : 1;
+    const crossX = Phaser.Math.Linear(prevX, ball.x, t);
+
+    const halfPaddle = this.paddle.displayWidth / 2;
+    const left = this.paddle.x - halfPaddle - BALL_RADIUS;
+    const right = this.paddle.x + halfPaddle + BALL_RADIUS;
+
+    if (crossX < left || crossX > right) return;
+
+    this.bounceFromPaddle(ball, crossX, paddleTop);
+  }
+
+  private bounceFromPaddle(ball: Phaser.Physics.Arcade.Image, crossX: number, paddleTop: number) {
+    const body = this.dynamicBody(ball);
+    const half = this.paddle.displayWidth / 2;
+    const offset = Phaser.Math.Clamp((crossX - this.paddle.x) / half, -1, 1);
+    const speed = Phaser.Math.Clamp(Math.max(440, body.velocity.length()), 440, 560);
+
+    // Maximum ~55° from vertical at the paddle edges.
+    const maxAngle = Phaser.Math.DegToRad(55);
+    const angleFromVertical = offset * maxAngle;
+    const vx = Math.sin(angleFromVertical) * speed;
+    const vy = -Math.cos(angleFromVertical) * speed;
+
+    // Put the ball exactly above the paddle plane before applying velocity.
+    ball.setPosition(crossX, paddleTop - BALL_RADIUS - 0.5);
     body.updateFromGameObject();
+    ball.setVelocity(vx, vy);
+
+    // Store the corrected location immediately so the next frame starts from
+    // the rebound point, not from the pre-bounce trajectory.
+    ball.setData("prevX", ball.x);
+    ball.setData("prevY", ball.y);
   }
 
   private createTextures() {
@@ -186,24 +225,19 @@ class GameScene extends Phaser.Scene {
     // ICE / GLASS BRICK -----------------------------------------------------
     g.fillStyle(0x06172e, 0.52);
     g.fillRoundedRect(2, 5, 69, 25, 6);
-
     g.fillStyle(0x78c9ef, 0.52);
     g.fillRoundedRect(0, 0, 70, 27, 6);
-
     g.fillStyle(0xdff7ff, 0.34);
     g.fillRoundedRect(4, 4, 62, 19, 4);
 
-    // Bright bevels.
     g.fillStyle(0xffffff, 0.34);
     g.fillTriangle(4, 4, 66, 4, 61, 9);
     g.fillTriangle(4, 4, 9, 9, 9, 22);
 
-    // Deep bevels.
     g.fillStyle(0x25658f, 0.27);
     g.fillTriangle(9, 22, 61, 22, 66, 26);
     g.fillTriangle(61, 9, 66, 4, 66, 26);
 
-    // Internal ice/refraction marks.
     g.lineStyle(1, 0xffffff, 0.92);
     g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
     g.lineStyle(1, 0xbcecff, 0.64);
@@ -351,22 +385,20 @@ class GameScene extends Phaser.Scene {
           data.power = specials[specialIndex % specials.length];
           specialIndex++;
 
-          // Fruit is intentionally rendered above the base ice texture so it
-          // is unmistakable, with a small glass glint above it to keep the
-          // impression that it is suspended inside the brick.
+          // Make power-up blocks obvious while preserving the frozen-in-glass look.
           const inset = this.add
-            .rectangle(x, y, 40, 25, 0x06172e, 0.38)
-            .setStrokeStyle(1, 0xdff6ff, 0.8)
+            .rectangle(x, y, 42, 25, 0x06172e, 0.46)
+            .setStrokeStyle(2, 0xf2c94c, 0.82)
             .setDepth(2.25);
 
           const fruit = this.add
             .image(x, y, `fruit-${data.power}`)
-            .setDisplaySize(31, 31)
+            .setDisplaySize(32, 32)
             .setAlpha(1)
             .setDepth(2.65);
 
           const glassGlint = this.add
-            .rectangle(x - 5, y - 7, 27, 3, 0xffffff, 0.28)
+            .rectangle(x - 5, y - 7, 28, 3, 0xffffff, 0.3)
             .setAngle(-5)
             .setDepth(2.9);
 
@@ -394,11 +426,13 @@ class GameScene extends Phaser.Scene {
 
   private spawnBall(x: number, y: number, vx: number, vy: number) {
     const ball = this.balls.create(x, y, "ball") as Phaser.Physics.Arcade.Image;
-    ball.setCircle(9);
+    ball.setCircle(BALL_RADIUS);
     ball.setCollideWorldBounds(true);
     ball.setBounce(1, 1);
     this.dynamicBody(ball).allowGravity = false;
     ball.setVelocity(vx, vy);
+    ball.setData("prevX", x);
+    ball.setData("prevY", y);
     return ball;
   }
 
@@ -407,8 +441,12 @@ class GameScene extends Phaser.Scene {
     this.balls.getChildren().forEach((child, i) => {
       const ball = child as Phaser.Physics.Arcade.Image;
       if (this.dynamicBody(ball).velocity.lengthSq() === 0) {
-        ball.setPosition(this.paddle.x + (i - (count - 1) / 2) * 20, PADDLE_Y - 28);
+        const x = this.paddle.x + (i - (count - 1) / 2) * 20;
+        const y = PADDLE_Y - 28;
+        ball.setPosition(x, y);
         this.dynamicBody(ball).updateFromGameObject();
+        ball.setData("prevX", x);
+        ball.setData("prevY", y);
       }
     });
   }
@@ -421,34 +459,10 @@ class GameScene extends Phaser.Scene {
 
     this.balls.getChildren().forEach((child, index) => {
       const ball = child as Phaser.Physics.Arcade.Image;
+      ball.setData("prevX", ball.x);
+      ball.setData("prevY", ball.y);
       ball.setVelocity(index % 2 === 0 ? 245 : -245, -360);
     });
-  }
-
-  private canBallHitPaddle(ballObj: Phaser.GameObjects.GameObject) {
-    const ball = ballObj as Phaser.Physics.Arcade.Image;
-    const body = this.dynamicBody(ball);
-
-    // One-way Pong paddle: only a descending ball whose center is above the
-    // paddle may collide. A missed ball below the paddle is allowed to fall.
-    return body.velocity.y > 0 && ball.y < this.paddle.y;
-  }
-
-  private onBallPaddle(ballObj: Phaser.GameObjects.GameObject) {
-    const ball = ballObj as Phaser.Physics.Arcade.Image;
-    const body = this.dynamicBody(ball);
-
-    // Phaser has already separated the bodies at this point. We only choose
-    // the rebound angle; we do not move either object manually.
-    const relative = (ball.x - this.paddle.x) / (this.paddle.displayWidth / 2);
-    const offset = Phaser.Math.Clamp(relative, -1, 1);
-    const speed = Phaser.Math.Clamp(Math.max(440, body.velocity.length()), 440, 560);
-
-    // Edge hits travel more sideways; center hits travel mostly upward.
-    const vx = offset * speed * 0.82;
-    const vy = -Math.sqrt(Math.max(190 * 190, speed * speed - vx * vx));
-
-    ball.setVelocity(vx, vy);
   }
 
   private onBallBrick(ballObj: Phaser.GameObjects.GameObject, brickObj: Phaser.GameObjects.GameObject) {
@@ -583,8 +597,7 @@ class GameScene extends Phaser.Scene {
     drop.setData("halo", halo);
   }
 
-  private onCatchDrop(_: Phaser.GameObjects.GameObject, dropObj: Phaser.GameObjects.GameObject) {
-    const drop = dropObj as Phaser.Physics.Arcade.Image;
+  private catchDrop(drop: Phaser.Physics.Arcade.Image) {
     if (!drop.active) return;
 
     const kind = drop.getData("kind") as PowerKind;
@@ -635,13 +648,11 @@ class GameScene extends Phaser.Scene {
         () => {
           this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, this.paddleHeight);
           this.paddle.setTint(COLORS.green);
-          this.syncPaddleBody();
           this.movePaddle(this.paddle.x);
         },
         () => {
           this.paddle.setDisplaySize(this.basePaddleWidth, this.paddleHeight);
           this.paddle.clearTint();
-          this.syncPaddleBody();
           this.movePaddle(this.paddle.x);
         },
       );
