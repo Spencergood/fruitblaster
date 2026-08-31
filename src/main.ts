@@ -54,9 +54,8 @@ class GameScene extends Phaser.Scene {
   }
 
   preload() {
-    // Phaser rasterizes SVG files when it loads them. Rasterizing the original
-    // art at 256px and displaying it much smaller keeps the beautiful vector
-    // edges crisp instead of starting from a tiny 48px bitmap.
+    // Phaser rasterizes SVG assets at load time. Oversampling them here keeps
+    // the original vector artwork crisp when we display it much smaller.
     const svgConfig = { width: FRUIT_SOURCE_SIZE, height: FRUIT_SOURCE_SIZE };
     this.load.svg("fruit-pepper", "/assets/produce/pepper.svg", svgConfig);
     this.load.svg("fruit-cherry", "/assets/produce/cherry.svg", svgConfig);
@@ -73,8 +72,7 @@ class GameScene extends Phaser.Scene {
     this.createBackdrop();
     this.createHud();
 
-    // Deliberately not a physics object. Paddle contact uses swept geometry,
-    // so it cannot tunnel through or get moved by Arcade collision solving.
+    // Paddle remains pure geometry. Swept collision below prevents tunneling.
     this.paddle = this.add.image(WIDTH / 2, PADDLE_Y, "paddle").setDepth(6);
 
     this.balls = this.physics.add.group({ allowGravity: false });
@@ -179,7 +177,6 @@ class GameScene extends Phaser.Scene {
     const paddleTop = this.paddle.y - this.paddle.displayHeight / 2;
     const prevBottom = prevY + BALL_RADIUS;
     const currentBottom = ball.y + BALL_RADIUS;
-
     if (prevBottom > paddleTop || currentBottom < paddleTop) return;
 
     const travel = currentBottom - prevBottom;
@@ -214,113 +211,103 @@ class GameScene extends Phaser.Scene {
     const drawIceBlock = (key: string, cracked: boolean) => {
       g.clear();
 
-      // Rear extrusion and contact shadow give the block actual visual depth.
-      g.fillStyle(0x020c18, 0.44);
-      g.fillRoundedRect(3, 5, 68, 25, 6);
-      g.fillStyle(0x123b58, 0.48);
-      g.fillRoundedRect(2, 3, 68, 25, 6);
+      // Deep rear volume. This is where the depth lives now, instead of a
+      // dark box around the fruit artwork.
+      g.fillStyle(0x020914, 0.5);
+      g.fillRoundedRect(4, 7, 67, 25, 6);
+      g.fillStyle(0x0d3554, 0.6);
+      g.fillRoundedRect(2, 4, 68, 26, 6);
 
-      // Main translucent ice volume.
-      g.fillStyle(0x67c5ef, 0.62);
-      g.fillRoundedRect(0, 0, 70, 27, 6);
-      g.fillStyle(0xdff8ff, 0.24);
-      g.fillRoundedRect(4, 4, 62, 19, 4);
+      // Main translucent ice body.
+      g.fillStyle(0x67c9f2, 0.7);
+      g.fillRoundedRect(0, 0, 70, 28, 6);
+      g.fillStyle(0xcff3ff, 0.22);
+      g.fillRoundedRect(4, 4, 62, 20, 4);
+
+      // Frosty volume and cloudy inclusions.
       g.fillStyle(0xffffff, 0.08);
-      g.fillRoundedRect(8, 7, 54, 12, 4);
+      g.fillEllipse(20, 15, 21, 10);
+      g.fillEllipse(50, 13, 18, 8);
+      g.fillStyle(0xbcecff, 0.1);
+      g.fillEllipse(35, 20, 28, 6);
 
-      // Strong top/left Fresnel bevel and darker lower/right facets.
-      g.fillStyle(0xffffff, 0.38);
-      g.fillTriangle(4, 4, 66, 4, 60, 9);
-      g.fillTriangle(4, 4, 10, 9, 10, 22);
-      g.fillStyle(0x174d72, 0.34);
-      g.fillTriangle(10, 22, 60, 22, 66, 26);
-      g.fillTriangle(60, 9, 66, 4, 66, 26);
-
-      // Internal cloudy inclusions and trapped micro-bubbles.
-      g.fillStyle(0xffffff, 0.075);
-      g.fillEllipse(20, 15, 20, 9);
-      g.fillEllipse(49, 12, 16, 7);
-      g.fillStyle(0xffffff, 0.17);
-      g.fillCircle(15, 10, 1.2);
-      g.fillCircle(22, 18, 0.9);
+      // Trapped bubbles.
+      g.fillStyle(0xffffff, 0.2);
+      g.fillCircle(14, 10, 1.2);
+      g.fillCircle(22, 19, 0.9);
       g.fillCircle(42, 8, 1.1);
       g.fillCircle(54, 17, 1.3);
-      g.fillCircle(60, 11, 0.8);
+      g.fillCircle(61, 11, 0.8);
 
-      // Refraction streaks and specular scratches.
-      g.lineStyle(2, 0xffffff, 0.64);
-      g.lineBetween(10, 5, 29, 5);
-      g.lineStyle(1, 0xffffff, 0.38);
-      g.lineBetween(14, 19, 29, 9);
-      g.lineBetween(39, 20, 50, 8);
-      g.lineBetween(47, 8, 61, 12);
+      // Faceted bevels make the block read as a chunk of ice.
+      g.fillStyle(0xffffff, 0.42);
+      g.fillTriangle(4, 4, 66, 4, 60, 9);
+      g.fillTriangle(4, 4, 10, 9, 10, 23);
 
-      // Crisp outer shell and inner face.
-      g.lineStyle(1, 0xffffff, 0.96);
-      g.strokeRoundedRect(0.5, 0.5, 69, 26, 6);
-      g.lineStyle(1, 0xcaf3ff, 0.62);
-      g.strokeRoundedRect(4.5, 4.5, 61, 18, 4);
+      g.fillStyle(0x123f63, 0.42);
+      g.fillTriangle(10, 23, 60, 23, 66, 28);
+      g.fillTriangle(60, 9, 66, 4, 66, 28);
+
+      // Internal refraction streaks.
+      g.lineStyle(2, 0xffffff, 0.68);
+      g.lineBetween(9, 5, 30, 5);
+      g.lineStyle(1, 0xffffff, 0.4);
+      g.lineBetween(14, 20, 29, 9);
+      g.lineBetween(39, 21, 51, 8);
+      g.lineBetween(47, 8, 62, 12);
+
+      // Crisp glass shell.
+      g.lineStyle(1, 0xffffff, 0.98);
+      g.strokeRoundedRect(0.5, 0.5, 69, 27, 6);
+      g.lineStyle(1, 0xdaf8ff, 0.66);
+      g.strokeRoundedRect(4.5, 4.5, 61, 19, 4);
 
       if (cracked) {
-        g.lineStyle(1.4, 0xf7feff, 0.95);
+        g.lineStyle(1.5, 0xffffff, 0.96);
         g.beginPath();
         g.moveTo(35, 2);
         g.lineTo(32, 9);
         g.lineTo(38, 14);
-        g.lineTo(33, 21);
-        g.lineTo(35, 28);
+        g.lineTo(33, 22);
+        g.lineTo(35, 29);
         g.moveTo(32, 9);
         g.lineTo(24, 13);
-        g.lineTo(18, 21);
+        g.lineTo(18, 22);
         g.moveTo(38, 14);
         g.lineTo(48, 10);
-        g.lineTo(57, 15);
+        g.lineTo(58, 15);
         g.strokePath();
       }
 
-      g.generateTexture(key, 72, 30);
+      g.generateTexture(key, 72, 33);
     };
 
     drawIceBlock("brick", false);
     drawIceBlock("brick-cracked", true);
 
-    // A translucent front lens that sits over produce in special blocks.
+    // Icy paddle.
     g.clear();
-    g.fillStyle(0x9fe1fb, 0.12);
-    g.fillRoundedRect(0, 0, 44, 28, 5);
-    g.fillStyle(0xffffff, 0.13);
-    g.fillRoundedRect(4, 3, 34, 6, 3);
-    g.fillStyle(0xffffff, 0.06);
-    g.fillEllipse(13, 18, 14, 7);
-    g.lineStyle(1, 0xffffff, 0.38);
-    g.strokeRoundedRect(0.5, 0.5, 43, 27, 5);
-    g.lineStyle(1, 0xffffff, 0.24);
-    g.lineBetween(8, 5, 30, 5);
-    g.lineBetween(24, 10, 36, 15);
-    g.generateTexture("ice-face", 44, 28);
-
-    // Dimensional icy paddle.
-    g.clear();
-    g.fillStyle(0x020c18, 0.62);
-    g.fillRoundedRect(2, 5, this.basePaddleWidth - 2, 18, 9);
-    g.fillStyle(0x77c8ef, 0.96);
+    g.fillStyle(0x020914, 0.64);
+    g.fillRoundedRect(2, 5, this.basePaddleWidth - 2, 19, 9);
+    g.fillStyle(0x7dcff3, 0.97);
     g.fillRoundedRect(0, 0, this.basePaddleWidth, 20, 9);
-    g.fillStyle(0xeaf9ff, 0.42);
+    g.fillStyle(0xeaf9ff, 0.44);
     g.fillRoundedRect(5, 3, this.basePaddleWidth - 10, 11, 6);
     g.fillStyle(COLORS.blue, 0.94);
     g.fillRoundedRect(18, 8, this.basePaddleWidth - 36, 7, 4);
-    g.lineStyle(2, 0xffffff, 0.96);
-    g.lineBetween(9, 3, 55, 3);
-    g.lineStyle(1, 0xffffff, 0.78);
+    g.lineStyle(2, 0xffffff, 0.98);
+    g.lineBetween(9, 3, 56, 3);
+    g.lineStyle(1, 0xffffff, 0.8);
     g.strokeRoundedRect(0.5, 0.5, this.basePaddleWidth - 1, 19, 9);
     g.generateTexture("paddle", this.basePaddleWidth, this.paddleHeight);
 
+    // Ball.
     g.clear();
     g.fillStyle(0xffffff, 1);
     g.fillCircle(9, 9, 8);
-    g.lineStyle(2, 0xa8e7ff, 0.95);
+    g.lineStyle(2, 0xa8e7ff, 0.96);
     g.strokeCircle(9, 9, 7);
-    g.fillStyle(0xe4faff, 0.92);
+    g.fillStyle(0xe4faff, 0.94);
     g.fillCircle(6, 5, 2.3);
     g.generateTexture("ball", 18, 18);
     g.destroy();
@@ -399,44 +386,29 @@ class GameScene extends Phaser.Scene {
           data.power = specials[specialIndex % specials.length];
           specialIndex++;
 
-          // Rear pocket + crisp oversampled produce + translucent front lens.
-          const inset = this.add
-            .rectangle(x, y + 1, 43, 26, 0x031120, 0.34)
-            .setStrokeStyle(1, 0xdff7ff, 0.46)
-            .setDepth(2.22);
-
-          const shadow = this.add
-            .ellipse(x + 1, y + 9, 24, 7, 0x020b14, 0.22)
-            .setDepth(2.35);
-
+          // No backing rectangle, no shadow ellipse, no border. The produce
+          // stays clean and crisp; the ice block itself supplies the depth.
           const fruit = this.add
             .image(x, y, `fruit-${data.power}`)
-            .setDisplaySize(34, 34)
+            .setDisplaySize(35, 35)
             .setAlpha(1)
             .setDepth(2.62);
 
-          const glassFace = this.add
-            .image(x, y, "ice-face")
-            .setDisplaySize(44, 28)
-            .setDepth(2.82);
-
+          // A tiny free-floating highlight suggests glass without boxing the
+          // fruit into its own framed UI element.
           const glint = this.add
-            .rectangle(x - 6, y - 8, 25, 2, 0xffffff, 0.3)
+            .rectangle(x - 5, y - 8, 20, 2, 0xffffff, 0.18)
             .setAngle(-5)
-            .setDepth(2.94);
+            .setDepth(2.9);
 
-          this.embeddedFruits.addMultiple([inset, shadow, fruit, glassFace, glint]);
-          brick.setData("fruitInset", inset);
-          brick.setData("fruitShadow", shadow);
+          this.embeddedFruits.addMultiple([fruit, glint]);
           brick.setData("fruitSprite", fruit);
-          brick.setData("fruitGlass", glassFace);
           brick.setData("fruitGlint", glint);
         }
 
         brick.setData("brickData", data);
         if (hp > 1) brick.setTint(0x8fc9e8);
 
-        // Sparse real WebGL specular sweep; not every block should sparkle.
         if (this.game.renderer.type === Phaser.WEBGL && index % 4 === 0) {
           brick.preFX?.addShine(0.14 + (index % 3) * 0.02, 0.16, 2.2, false);
         }
@@ -530,10 +502,7 @@ class GameScene extends Phaser.Scene {
     const x = brick.x;
     const y = brick.y;
 
-    (brick.getData("fruitInset") as Phaser.GameObjects.Rectangle | undefined)?.destroy();
-    (brick.getData("fruitShadow") as Phaser.GameObjects.Ellipse | undefined)?.destroy();
     (brick.getData("fruitSprite") as Phaser.GameObjects.Image | undefined)?.destroy();
-    (brick.getData("fruitGlass") as Phaser.GameObjects.Image | undefined)?.destroy();
     (brick.getData("fruitGlint") as Phaser.GameObjects.Rectangle | undefined)?.destroy();
 
     this.shatter(x, y);
@@ -771,7 +740,6 @@ const config: Phaser.Types.Core.GameConfig = {
   parent: "game",
   width: WIDTH,
   height: HEIGHT,
-  resolution: Math.min(window.devicePixelRatio || 1, 2),
   antialias: true,
   roundPixels: true,
   backgroundColor: COLORS.ink,
