@@ -1,4 +1,5 @@
-export type DinoSpecies = "steggy" | "raptor" | "bronto";
+/** Matches the Pomptonian dino character sheet. */
+export type DinoSpecies = "stretch" | "spike" | "chomp";
 
 export type PetRecord = {
   id: string;
@@ -19,8 +20,8 @@ export type PetProgressResult = {
   hatched: PetRecord[];
 };
 
-const STORAGE_KEY = "fruitblaster:pets:v1";
-const SPECIES: DinoSpecies[] = ["steggy", "raptor", "bronto"];
+const STORAGE_KEY = "fruitblaster:pets:v2";
+const SPECIES: DinoSpecies[] = ["stretch", "spike", "chomp"];
 const MAX_PETS = 10;
 
 const emptyState = (): PetSessionState => ({
@@ -61,7 +62,7 @@ export function savePetSession(state: PetSessionState) {
 
 export function progressPetsForCompletedLevel(
   current: PetSessionState,
-  eggChance = 0.35,
+  eggChance = 0.3,
 ): PetProgressResult {
   const state: PetSessionState = {
     completedLevels: current.completedLevels + 1,
@@ -97,8 +98,14 @@ export function progressPetsForCompletedLevel(
   return { state, foundEgg, hatched };
 }
 
+export const SPECIES_NAMES: Record<DinoSpecies, string> = {
+  stretch: "STRETCH",
+  spike: "SPIKE",
+  chomp: "CHOMP",
+};
+
 function randomSpecies(): DinoSpecies {
-  return SPECIES[Math.floor(Math.random() * SPECIES.length)] ?? "steggy";
+  return SPECIES[Math.floor(Math.random() * SPECIES.length)] ?? "stretch";
 }
 
 function randomInt(min: number, max: number) {
@@ -116,7 +123,7 @@ function isPetRecord(value: unknown): value is PetRecord {
   return (
     typeof pet.id === "string" &&
     (pet.stage === "egg" || pet.stage === "dino") &&
-    (pet.species === "steggy" || pet.species === "raptor" || pet.species === "bronto") &&
+    (pet.species === "stretch" || pet.species === "spike" || pet.species === "chomp") &&
     typeof pet.foundAtCompletedLevel === "number" &&
     typeof pet.levelsToHatch === "number"
   );

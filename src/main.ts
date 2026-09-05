@@ -1,25 +1,46 @@
 import Phaser from "phaser";
+import { Sfx } from "./audio";
+import { buildLevel } from "./levels";
+import { Habitat, preloadHabitat } from "./habitat";
+import { loadPetSession, PetSessionState, progressPetsForCompletedLevel, SPECIES_NAMES } from "./pets";
+import {
+  BALL_RADIUS,
+  BASE_PADDLE_WIDTH,
+  COLORS,
+  FIELD_BOTTOM,
+  FONT,
+  FRUIT_SOURCE_SIZE,
+  HEIGHT,
+  PADDLE_HEIGHT,
+  PADDLE_Y,
+  POWERS,
+  PowerKind,
+  WIDE_PADDLE_WIDTH,
+  WIDTH,
+} from "./theme";
+import { BRICK_W, createTextures } from "./textures";
 
-const WIDTH = 960;
-const HEIGHT = 640;
-const PADDLE_Y = HEIGHT - 54;
-const BALL_RADIUS = 9;
-const FRUIT_SOURCE_SIZE = 256;
+const BEST_KEY = "fruitblaster:best:v1";
 
-const COLORS = {
-  ink: 0x081735,
-  blue: 0x143d88,
-  cream: 0xf7f2e7,
-  yellow: 0xf2c94c,
-  red: 0xe4573d,
-  green: 0x3f6949,
-};
-
-type PowerKind = "pepper" | "cherry" | "pea" | "carrot" | "broccoli";
+/** Underside of the HUD band. The ball bounces here so it is never hidden. */
+const CEILING = 84;
+const GRID_TOP = 118;
+const ROW_HEIGHT = 40;
+const BRICK_GAP = 8;
+const EFFECT_MS = 12000;
+const TRAIL_POINTS = 9;
+const MAX_BALLS = 8;
 
 type BrickData = {
   hp: number;
   power?: PowerKind;
+};
+
+type Chip = {
+  kind: PowerKind;
+  container: Phaser.GameObjects.Container;
+  bar: Phaser.GameObjects.Rectangle;
+  barWidth: number;
 };
 
 class GameScene extends Phaser.Scene {
@@ -27,27 +48,50 @@ class GameScene extends Phaser.Scene {
   private balls!: Phaser.Physics.Arcade.Group;
   private bricks!: Phaser.Physics.Arcade.StaticGroup;
   private drops!: Phaser.Physics.Arcade.Group;
-  private embeddedFruits!: Phaser.GameObjects.Group;
+  private decorations!: Phaser.GameObjects.Group;
+
+  private shardBurst!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private sparkBurst!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private trailGfx!: Phaser.GameObjects.Graphics;
+  private aimGfx!: Phaser.GameObjects.Graphics;
+  private floorGlow!: Phaser.GameObjects.Rectangle;
+  private scrim!: Phaser.GameObjects.Rectangle;
+  private motes: Phaser.GameObjects.Image[] = [];
 
   private scoreText!: Phaser.GameObjects.Text;
-  private livesText!: Phaser.GameObjects.Text;
+  private bestText!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
-  private messageText!: Phaser.GameObjects.Text;
+  private hintText!: Phaser.GameObjects.Text;
+  private bannerText!: Phaser.GameObjects.Text;
+  private subBannerText!: Phaser.GameObjects.Text;
+  private pauseText!: Phaser.GameObjects.Text;
+  private muteText!: Phaser.GameObjects.Text;
+  private lifeIcons: Phaser.GameObjects.Image[] = [];
+  private habitat!: Habitat;
 
-  private score = 0;
-  private lives = 3;
-  private level = 1;
-  private launched = false;
-  private gameOver = false;
-  private explosiveHits = 0;
-
-  private paddleSpeed = 520;
-  private readonly basePaddleWidth = 132;
-  private readonly paddleHeight = 24;
-
+  private sfx!: Sfx;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
+
+  private score = 0;
+  private shownScore = 0;
+  private best = 0;
+  private lives = 3;
+  private level = 1;
+  private combo = 0;
+  private brickTotal = 1;
+  private explosiveHits = 0;
+  private launched = false;
+  private gameOver = false;
+  private gameOverAt = 0;
+  private paused = false;
+  private transitioning = false;
+  private beatBest = false;
+
+  private paddleTurbo = false;
   private timedEffects = new Map<PowerKind, Phaser.Time.TimerEvent>();
+  private chips = new Map<PowerKind, Chip>();
+  private pets: PetSessionState = { completedLevels: 0, pets: [] };
 
   constructor() {
     super("game");
@@ -62,15 +106,50 @@ class GameScene extends Phaser.Scene {
     this.load.svg("fruit-pea", "/assets/produce/pea-pod.svg", svgConfig);
     this.load.svg("fruit-carrot", "/assets/produce/carrot.svg", svgConfig);
     this.load.svg("fruit-broccoli", "/assets/produce/broccoli.svg", svgConfig);
+
+    preloadHabitat(this);
+  }
+
+  /**
+   * Class-field initialisers only run once per scene instance, so every piece
+   * of run state has to be reset here or a restart inherits the dead run.
+   */
+  init() {
+    this.score = 0;
+    this.shownScore = 0;
+    this.lives = 3;
+    this.level = 1;
+    this.combo = 0;
+    this.brickTotal = 1;
+    this.explosiveHits = 0;
+    this.launched = false;
+    this.gameOver = false;
+    this.gameOverAt = 0;
+    this.paused = false;
+    this.transitioning = false;
+    this.beatBest = false;
+    this.paddleTurbo = false;
+    this.timedEffects = new Map();
+    this.chips = new Map();
+    this.lifeIcons = [];
+    this.motes = [];
+    this.best = readBest();
+    this.pets = loadPetSession();
   }
 
   create() {
     this.cameras.main.setBackgroundColor(COLORS.ink);
     this.cameras.main.roundPixels = true;
 
-    this.createTextures();
+    createTextures(this);
+    this.sfx = new Sfx(getAudioContext(this));
+
     this.createBackdrop();
+    this.createEmitters();
     this.createHud();
+
+    this.habitat = new Habitat(this);
+    this.habitat.sync(this.pets.pets);
 
     // Paddle remains pure geometry. Swept collision below prevents tunneling.
     this.paddle = this.add.image(WIDTH / 2, PADDLE_Y, "paddle").setDepth(6);
@@ -78,8 +157,10 @@ class GameScene extends Phaser.Scene {
     this.balls = this.physics.add.group({ allowGravity: false });
     this.drops = this.physics.add.group({ allowGravity: false });
     this.bricks = this.physics.add.staticGroup();
-    this.embeddedFruits = this.add.group();
+    this.decorations = this.add.group();
 
+    // Ceiling sits under the HUD band so the ball never vanishes behind it.
+    this.physics.world.setBounds(0, CEILING, WIDTH, FIELD_BOTTOM - CEILING + 60);
     this.physics.world.setBoundsCollision(true, true, true, false);
     this.physics.add.collider(
       this.balls,
@@ -90,75 +171,117 @@ class GameScene extends Phaser.Scene {
     );
 
     this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = this.input.keyboard!.addKeys("A,D,SPACE,R") as Record<string, Phaser.Input.Keyboard.Key>;
+    this.keys = this.input.keyboard!.addKeys("A,D,SPACE,R,P,M,ESC") as Record<
+      string,
+      Phaser.Input.Keyboard.Key
+    >;
 
     this.input.on("pointermove", (pointer: Phaser.Input.Pointer) => {
-      if (this.gameOver) return;
+      if (this.gameOver || this.paused) return;
       this.movePaddle(pointer.x);
       if (!this.launched) this.attachUnlaunchedBalls();
     });
 
-    this.input.on("pointerdown", () => this.launch());
+    this.input.on("pointerdown", () => {
+      this.sfx.resume();
+      if (this.gameOver) this.tryRestart();
+      else if (!this.paused) this.launch();
+    });
+
+    this.input.keyboard!.on("keydown", () => this.sfx.resume());
+
     this.startLevel();
   }
 
-  update(_: number, delta: number) {
+  update(time: number, delta: number) {
+    const dt = Math.min(delta, 50) / 1000;
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.M)) this.toggleMute();
+
     if (this.gameOver) {
-      if (Phaser.Input.Keyboard.JustDown(this.keys.R)) this.scene.restart();
+      if (
+        Phaser.Input.Keyboard.JustDown(this.keys.R) ||
+        Phaser.Input.Keyboard.JustDown(this.keys.SPACE)
+      ) {
+        this.tryRestart();
+      }
+      this.driftMotes(dt);
+      this.habitat.update(dt);
       return;
     }
 
-    const dt = delta / 1000;
+    if (
+      Phaser.Input.Keyboard.JustDown(this.keys.P) ||
+      Phaser.Input.Keyboard.JustDown(this.keys.ESC)
+    ) {
+      this.togglePause();
+    }
+    if (this.paused) return;
+
+    this.driftMotes(dt);
+    this.habitat.update(dt);
+    this.updateScoreReadout();
+    this.updateChips();
+
     let direction = 0;
     if (this.cursors.left.isDown || this.keys.A.isDown) direction -= 1;
     if (this.cursors.right.isDown || this.keys.D.isDown) direction += 1;
 
     if (direction !== 0) {
-      this.movePaddle(this.paddle.x + direction * this.paddleSpeed * dt);
+      this.movePaddle(this.paddle.x + direction * this.paddleSpeed() * dt);
       if (!this.launched) this.attachUnlaunchedBalls();
     }
 
     if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) this.launch();
 
+    let lowestBall = 0;
     this.balls.getChildren().forEach((child) => {
       const ball = child as Phaser.Physics.Arcade.Image;
       if (!ball.active) return;
 
-      if (this.launched) this.handlePaddleSweep(ball);
+      if (this.launched) {
+        this.handlePaddleSweep(ball);
+        this.normalizeBall(ball);
+        this.reportWallHits(ball, time);
+      }
 
-      if (ball.y > HEIGHT + 30) {
-        ball.destroy();
+      if (ball.y > FIELD_BOTTOM - 4) {
+        this.sinkBall(ball);
         return;
       }
 
+      lowestBall = Math.max(lowestBall, ball.y);
+      this.pushTrail(ball);
       ball.setData("prevX", ball.x);
       ball.setData("prevY", ball.y);
     });
 
-    const paddleBounds = this.paddle.getBounds();
-    this.drops.getChildren().forEach((child) => {
-      const drop = child as Phaser.Physics.Arcade.Image;
-      if (!drop.active) return;
+    this.drawTrails();
+    this.drawAim();
+    this.updateFloorGlow(lowestBall);
+    this.updateDrops();
 
-      const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
-      halo?.setPosition(Math.round(drop.x), Math.round(drop.y));
-
-      if (Phaser.Geom.Intersects.RectangleToRectangle(paddleBounds, drop.getBounds())) {
-        this.catchDrop(drop);
-        return;
-      }
-
-      if (drop.y > HEIGHT + 40) {
-        halo?.destroy();
-        drop.destroy();
-      }
-    });
-
-    if (this.launched && this.balls.countActive(true) === 0) this.loseLife();
+    if (this.launched && !this.transitioning && this.balls.countActive(true) === 0) {
+      this.loseLife();
+    }
   }
+
+  // ---------------------------------------------------------------- movement
 
   private dynamicBody(image: Phaser.Physics.Arcade.Image) {
     return image.body as Phaser.Physics.Arcade.Body;
+  }
+
+  private paddleSpeed() {
+    const base = Math.min(680, 540 + (this.level - 1) * 12);
+    return this.paddleTurbo ? base * 1.45 : base;
+  }
+
+  /** Constant ball speed, ramping with the level and as the level empties. */
+  private targetBallSpeed() {
+    const remaining = this.bricks.countActive(true);
+    const cleared = Phaser.Math.Clamp(1 - remaining / Math.max(1, this.brickTotal), 0, 1);
+    return Math.min(690, 430 + (this.level - 1) * 20 + cleared * 70);
   }
 
   private movePaddle(x: number) {
@@ -174,7 +297,7 @@ class GameScene extends Phaser.Scene {
     const prevX = (ball.getData("prevX") as number | undefined) ?? ball.x;
     const prevY = (ball.getData("prevY") as number | undefined) ?? ball.y;
 
-    const paddleTop = this.paddle.y - this.paddle.displayHeight / 2;
+    const paddleTop = this.paddle.y - PADDLE_HEIGHT / 2;
     const prevBottom = prevY + BALL_RADIUS;
     const currentBottom = ball.y + BALL_RADIUS;
     if (prevBottom > paddleTop || currentBottom < paddleTop) return;
@@ -195,242 +318,479 @@ class GameScene extends Phaser.Scene {
     const body = this.dynamicBody(ball);
     const half = this.paddle.displayWidth / 2;
     const offset = Phaser.Math.Clamp((crossX - this.paddle.x) / half, -1, 1);
-    const speed = Phaser.Math.Clamp(Math.max(440, body.velocity.length()), 440, 560);
-    const angleFromVertical = offset * Phaser.Math.DegToRad(55);
+    const speed = this.targetBallSpeed();
+
+    // A dead-centre hit still gets a small kick so the ball never locks into a
+    // vertical bounce loop.
+    const bias = Math.abs(offset) < 0.06 ? (offset >= 0 ? 0.06 : -0.06) : offset;
+    const angleFromVertical = bias * Phaser.Math.DegToRad(58);
 
     ball.setPosition(Math.round(crossX), paddleTop - BALL_RADIUS - 0.5);
     body.updateFromGameObject();
     ball.setVelocity(Math.sin(angleFromVertical) * speed, -Math.cos(angleFromVertical) * speed);
     ball.setData("prevX", ball.x);
     ball.setData("prevY", ball.y);
+
+    this.onPaddleHit(crossX, paddleTop, offset);
   }
 
-  private createTextures() {
-    const g = this.make.graphics({ x: 0, y: 0 });
+  private onPaddleHit(x: number, y: number, offset: number) {
+    this.combo = 0;
+    this.sfx.play("paddle", offset * 3);
+    this.sparkBurst.setParticleTint(COLORS.iceLight);
+    this.sparkBurst.emitParticleAt(x, y, 5);
 
-    const drawIceBlock = (key: string, cracked: boolean) => {
-      g.clear();
-
-      // Deep rear volume. This is where the depth lives now, instead of a
-      // dark box around the fruit artwork.
-      g.fillStyle(0x020914, 0.5);
-      g.fillRoundedRect(4, 7, 67, 25, 6);
-      g.fillStyle(0x0d3554, 0.6);
-      g.fillRoundedRect(2, 4, 68, 26, 6);
-
-      // Main translucent ice body.
-      g.fillStyle(0x67c9f2, 0.7);
-      g.fillRoundedRect(0, 0, 70, 28, 6);
-      g.fillStyle(0xcff3ff, 0.22);
-      g.fillRoundedRect(4, 4, 62, 20, 4);
-
-      // Frosty volume and cloudy inclusions.
-      g.fillStyle(0xffffff, 0.08);
-      g.fillEllipse(20, 15, 21, 10);
-      g.fillEllipse(50, 13, 18, 8);
-      g.fillStyle(0xbcecff, 0.1);
-      g.fillEllipse(35, 20, 28, 6);
-
-      // Trapped bubbles.
-      g.fillStyle(0xffffff, 0.2);
-      g.fillCircle(14, 10, 1.2);
-      g.fillCircle(22, 19, 0.9);
-      g.fillCircle(42, 8, 1.1);
-      g.fillCircle(54, 17, 1.3);
-      g.fillCircle(61, 11, 0.8);
-
-      // Faceted bevels make the block read as a chunk of ice.
-      g.fillStyle(0xffffff, 0.42);
-      g.fillTriangle(4, 4, 66, 4, 60, 9);
-      g.fillTriangle(4, 4, 10, 9, 10, 23);
-
-      g.fillStyle(0x123f63, 0.42);
-      g.fillTriangle(10, 23, 60, 23, 66, 28);
-      g.fillTriangle(60, 9, 66, 4, 66, 28);
-
-      // Internal refraction streaks.
-      g.lineStyle(2, 0xffffff, 0.68);
-      g.lineBetween(9, 5, 30, 5);
-      g.lineStyle(1, 0xffffff, 0.4);
-      g.lineBetween(14, 20, 29, 9);
-      g.lineBetween(39, 21, 51, 8);
-      g.lineBetween(47, 8, 62, 12);
-
-      // Crisp glass shell.
-      g.lineStyle(1, 0xffffff, 0.98);
-      g.strokeRoundedRect(0.5, 0.5, 69, 27, 6);
-      g.lineStyle(1, 0xdaf8ff, 0.66);
-      g.strokeRoundedRect(4.5, 4.5, 61, 19, 4);
-
-      if (cracked) {
-        g.lineStyle(1.5, 0xffffff, 0.96);
-        g.beginPath();
-        g.moveTo(35, 2);
-        g.lineTo(32, 9);
-        g.lineTo(38, 14);
-        g.lineTo(33, 22);
-        g.lineTo(35, 29);
-        g.moveTo(32, 9);
-        g.lineTo(24, 13);
-        g.lineTo(18, 22);
-        g.moveTo(38, 14);
-        g.lineTo(48, 10);
-        g.lineTo(58, 15);
-        g.strokePath();
-      }
-
-      g.generateTexture(key, 72, 33);
-    };
-
-    drawIceBlock("brick", false);
-    drawIceBlock("brick-cracked", true);
-
-    // Icy paddle.
-    g.clear();
-    g.fillStyle(0x020914, 0.64);
-    g.fillRoundedRect(2, 5, this.basePaddleWidth - 2, 19, 9);
-    g.fillStyle(0x7dcff3, 0.97);
-    g.fillRoundedRect(0, 0, this.basePaddleWidth, 20, 9);
-    g.fillStyle(0xeaf9ff, 0.44);
-    g.fillRoundedRect(5, 3, this.basePaddleWidth - 10, 11, 6);
-    g.fillStyle(COLORS.blue, 0.94);
-    g.fillRoundedRect(18, 8, this.basePaddleWidth - 36, 7, 4);
-    g.lineStyle(2, 0xffffff, 0.98);
-    g.lineBetween(9, 3, 56, 3);
-    g.lineStyle(1, 0xffffff, 0.8);
-    g.strokeRoundedRect(0.5, 0.5, this.basePaddleWidth - 1, 19, 9);
-    g.generateTexture("paddle", this.basePaddleWidth, this.paddleHeight);
-
-    // Ball.
-    g.clear();
-    g.fillStyle(0xffffff, 1);
-    g.fillCircle(9, 9, 8);
-    g.lineStyle(2, 0xa8e7ff, 0.96);
-    g.strokeCircle(9, 9, 7);
-    g.fillStyle(0xe4faff, 0.94);
-    g.fillCircle(6, 5, 2.3);
-    g.generateTexture("ball", 18, 18);
-    g.destroy();
+    this.tweens.killTweensOf(this.paddle);
+    this.paddle.setScale(1, 0.68);
+    this.tweens.add({
+      targets: this.paddle,
+      scaleY: 1,
+      duration: 180,
+      ease: "Back.easeOut",
+    });
   }
+
+  /**
+   * Arcade bounce preserves whatever velocity a collision produces, which
+   * eventually leaves the ball crawling along a near-horizontal line. Pinning
+   * the speed and clamping the angle keeps every rally readable.
+   */
+  private normalizeBall(ball: Phaser.Physics.Arcade.Image) {
+    const body = this.dynamicBody(ball);
+    let { x: vx, y: vy } = body.velocity;
+    if (vx === 0 && vy === 0) return;
+
+    const speed = this.targetBallSpeed();
+    const minVy = speed * 0.34;
+    const minVx = speed * 0.14;
+
+    if (Math.abs(vy) < minVy) vy = (vy < 0 ? -1 : 1) * minVy;
+    if (Math.abs(vx) < minVx) vx = (vx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(vx)) * minVx;
+
+    const length = Math.hypot(vx, vy);
+    body.velocity.set((vx / length) * speed, (vy / length) * speed);
+  }
+
+  private reportWallHits(ball: Phaser.Physics.Arcade.Image, time: number) {
+    const body = this.dynamicBody(ball);
+    if (!body.blocked.left && !body.blocked.right && !body.blocked.up) return;
+
+    const readyAt = (ball.getData("wallAt") as number | undefined) ?? 0;
+    if (time < readyAt) return;
+    ball.setData("wallAt", time + 90);
+
+    const x = body.blocked.left ? 2 : body.blocked.right ? WIDTH - 2 : ball.x;
+    const y = body.blocked.up ? CEILING + 2 : ball.y;
+    this.sparkBurst.setParticleTint(COLORS.iceLight);
+    this.sparkBurst.emitParticleAt(x, y, 3);
+    this.sfx.play("wall");
+  }
+
+  // ------------------------------------------------------------------ visual
 
   private createBackdrop() {
-    const grid = this.add.graphics();
+    const grid = this.add.graphics().setDepth(0);
     grid.lineStyle(1, COLORS.blue, 0.12);
-    for (let x = 0; x <= WIDTH; x += 48) grid.lineBetween(x, 0, x, HEIGHT);
-    for (let y = 0; y <= HEIGHT; y += 48) grid.lineBetween(0, y, WIDTH, y);
+    for (let x = 0; x <= WIDTH; x += 48) grid.lineBetween(x, 0, x, FIELD_BOTTOM);
+    for (let y = 0; y <= FIELD_BOTTOM; y += 48) grid.lineBetween(0, y, WIDTH, y);
 
-    this.add.rectangle(WIDTH / 2, 42, WIDTH, 84, 0x06112a, 0.95).setDepth(5);
-    this.add.rectangle(WIDTH / 2, HEIGHT - 6, WIDTH, 12, COLORS.blue, 0.5);
+    // Slow frost motes give the empty field some life without costing much.
+    for (let i = 0; i < 16; i++) {
+      const mote = this.add
+        .image(Phaser.Math.Between(0, WIDTH), Phaser.Math.Between(CEILING, FIELD_BOTTOM), "spark")
+        .setScale(Phaser.Math.FloatBetween(0.4, 1.1))
+        .setAlpha(Phaser.Math.FloatBetween(0.05, 0.16))
+        .setDepth(0);
+      mote.setData("speed", Phaser.Math.FloatBetween(6, 20));
+      this.motes.push(mote);
+    }
+
+    this.trailGfx = this.add.graphics().setDepth(3.4);
+    this.aimGfx = this.add.graphics().setDepth(6.4);
+
+    // HUD band, plus a hard ice edge marking the ceiling the ball bounces off.
+    this.add.rectangle(WIDTH / 2, CEILING / 2, WIDTH, CEILING, 0x06112a, 0.95).setDepth(5);
+    this.add.rectangle(WIDTH / 2, CEILING, WIDTH, 2, 0x9fdcf5, 0.5).setDepth(5);
+
+    this.add.rectangle(WIDTH / 2, FIELD_BOTTOM - 6, WIDTH, 12, COLORS.blue, 0.5).setDepth(1);
+    this.floorGlow = this.add
+      .rectangle(WIDTH / 2, FIELD_BOTTOM - 6, WIDTH, 12, COLORS.red, 0)
+      .setDepth(1.1);
+  }
+
+  private createEmitters() {
+    this.shardBurst = this.add
+      .particles(0, 0, "shard", {
+        speed: { min: 70, max: 280 },
+        angle: { min: 0, max: 360 },
+        lifespan: { min: 260, max: 560 },
+        scale: { start: 1, end: 0.2 },
+        alpha: { start: 0.95, end: 0 },
+        rotate: { min: -220, max: 220 },
+        gravityY: 300,
+        tint: [0xffffff, 0xd6f4ff, 0x9fdcf5],
+        emitting: false,
+      })
+      .setDepth(4);
+
+    this.sparkBurst = this.add
+      .particles(0, 0, "spark", {
+        speed: { min: 40, max: 170 },
+        angle: { min: 0, max: 360 },
+        lifespan: { min: 160, max: 340 },
+        scale: { start: 0.9, end: 0 },
+        alpha: { start: 0.85, end: 0 },
+        emitting: false,
+      })
+      .setDepth(7);
   }
 
   private createHud() {
     const style: Phaser.Types.GameObjects.Text.TextStyle = {
-      fontFamily: "Arial Black, Arial, sans-serif",
-      fontSize: "18px",
+      fontFamily: FONT,
+      fontSize: "20px",
       color: "#F7F2E7",
       stroke: "#081735",
       strokeThickness: 4,
     };
+    const small: Phaser.Types.GameObjects.Text.TextStyle = {
+      fontFamily: FONT,
+      fontSize: "12px",
+      color: "#7FA8D8",
+    };
 
-    this.scoreText = this.add.text(24, 22, "SCORE 000000", style).setDepth(10);
-    this.levelText = this.add.text(WIDTH / 2, 22, "LEVEL 01", style).setOrigin(0.5, 0).setDepth(10);
-    this.livesText = this.add.text(WIDTH - 24, 22, "BALLS × 3", style).setOrigin(1, 0).setDepth(10);
-    this.messageText = this.add
-      .text(WIDTH / 2, HEIGHT - 110, "SPACE / CLICK TO LAUNCH", {
-        ...style,
-        fontSize: "16px",
-        color: "#F2C94C",
-      })
+    this.scoreText = this.add.text(24, 16, "SCORE 000000", style).setDepth(10);
+    this.bestText = this.add.text(24, 46, "BEST 000000", small).setDepth(10);
+    this.levelText = this.add
+      .text(WIDTH / 2, 16, "LEVEL 01", style)
+      .setOrigin(0.5, 0)
+      .setDepth(10);
+    this.muteText = this.add
+      .text(WIDTH - 20, FIELD_BOTTOM + 14, "", { ...small, color: "#3E5C8C", fontSize: "11px" })
+      .setOrigin(1, 0)
+      .setDepth(16);
+
+    this.hintText = this.add
+      .text(WIDTH / 2, FIELD_BOTTOM - 152, "", { ...style, fontSize: "16px", color: "#F2C94C" })
       .setOrigin(0.5)
       .setDepth(20);
+
+    // Covers the field only, so the HUD and the habitat stay readable.
+    this.scrim = this.add
+      .rectangle(WIDTH / 2, (CEILING + FIELD_BOTTOM) / 2, WIDTH, FIELD_BOTTOM - CEILING, COLORS.ink, 1)
+      .setDepth(29)
+      .setAlpha(0);
+
+    this.bannerText = this.add
+      .text(WIDTH / 2, FIELD_BOTTOM / 2 - 40, "", {
+        ...style,
+        fontSize: "46px",
+        align: "center",
+        strokeThickness: 8,
+      })
+      .setLineSpacing(6)
+      .setOrigin(0.5)
+      .setDepth(30)
+      .setAlpha(0);
+
+    this.subBannerText = this.add
+      .text(WIDTH / 2, FIELD_BOTTOM / 2 + 34, "", {
+        ...style,
+        fontSize: "18px",
+        color: "#F2C94C",
+        align: "center",
+      })
+      .setLineSpacing(8)
+      .setOrigin(0.5)
+      .setDepth(30)
+      .setAlpha(0);
+
+    this.pauseText = this.add
+      .text(WIDTH / 2, FIELD_BOTTOM / 2, "PAUSED\nPRESS P TO RESUME", {
+        ...style,
+        fontSize: "32px",
+        align: "center",
+      })
+      .setOrigin(0.5)
+      .setDepth(40)
+      .setVisible(false);
+
+    this.refreshLives();
+    this.refreshHud();
+    this.updateMuteLabel();
   }
+
+  private refreshHud() {
+    this.levelText.setText(`LEVEL ${String(this.level).padStart(2, "0")}`);
+    this.bestText.setText(`BEST ${String(Math.max(this.best, this.score)).padStart(6, "0")}`);
+  }
+
+  private updateScoreReadout() {
+    if (this.shownScore === this.score) return;
+    const step = Math.max(4, Math.ceil((this.score - this.shownScore) * 0.2));
+    this.shownScore = Math.min(this.score, this.shownScore + step);
+    this.scoreText.setText(`SCORE ${String(this.shownScore).padStart(6, "0")}`);
+  }
+
+  private addScore(points: number) {
+    this.score += points;
+    if (this.score > this.best) {
+      this.best = this.score;
+      this.beatBest = true;
+      this.bestText.setText(`BEST ${String(this.best).padStart(6, "0")}`);
+    }
+  }
+
+  private refreshLives() {
+    this.lifeIcons.forEach((icon) => icon.destroy());
+    this.lifeIcons = [];
+    for (let i = 0; i < Math.max(0, this.lives); i++) {
+      this.lifeIcons.push(
+        this.add
+          .image(WIDTH - 26 - i * 22, 26, "ball")
+          .setScale(0.85)
+          .setDepth(10),
+      );
+    }
+  }
+
+  private driftMotes(dt: number) {
+    this.motes.forEach((mote) => {
+      mote.y -= (mote.getData("speed") as number) * dt;
+      if (mote.y < CEILING) {
+        mote.y = FIELD_BOTTOM;
+        mote.x = Phaser.Math.Between(0, WIDTH);
+      }
+    });
+  }
+
+  private updateFloorGlow(lowestBall: number) {
+    const danger = Phaser.Math.Clamp((lowestBall - (FIELD_BOTTOM - 210)) / 170, 0, 1);
+    this.floorGlow.setAlpha(danger * 0.75);
+  }
+
+  private pushTrail(ball: Phaser.Physics.Arcade.Image) {
+    let trail = ball.getData("trail") as number[] | undefined;
+    if (!trail) {
+      trail = [];
+      ball.setData("trail", trail);
+    }
+    trail.push(ball.x, ball.y);
+    if (trail.length > TRAIL_POINTS * 2) trail.splice(0, trail.length - TRAIL_POINTS * 2);
+  }
+
+  private drawTrails() {
+    this.trailGfx.clear();
+    if (!this.launched) return;
+
+    const color = this.explosiveHits > 0 ? COLORS.red : 0xa8e7ff;
+    this.balls.getChildren().forEach((child) => {
+      const ball = child as Phaser.Physics.Arcade.Image;
+      if (!ball.active) return;
+      const trail = ball.getData("trail") as number[] | undefined;
+      if (!trail) return;
+
+      const points = trail.length / 2;
+      for (let i = 0; i < points; i++) {
+        const t = (i + 1) / points;
+        this.trailGfx.fillStyle(color, 0.46 * t * t);
+        this.trailGfx.fillCircle(trail[i * 2], trail[i * 2 + 1], BALL_RADIUS * 0.86 * t);
+      }
+    });
+  }
+
+  private drawAim() {
+    this.aimGfx.clear();
+    if (this.launched || this.transitioning || this.gameOver) return;
+
+    const ball = this.balls.getChildren()[0] as Phaser.Physics.Arcade.Image | undefined;
+    if (!ball || !ball.active) return;
+
+    const angle = this.aimAngle();
+    const dx = Math.sin(angle);
+    const dy = -Math.cos(angle);
+    for (let i = 1; i <= 5; i++) {
+      const distance = 22 + i * 18;
+      this.aimGfx.fillStyle(COLORS.yellow, 0.85 - i * 0.12);
+      this.aimGfx.fillCircle(ball.x + dx * distance, ball.y + dy * distance, 4.4 - i * 0.5);
+    }
+  }
+
+  /** Serve always heads back toward the middle of the field. */
+  private aimAngle() {
+    const direction = this.paddle.x <= WIDTH / 2 ? 1 : -1;
+    return Phaser.Math.DegToRad(30) * direction;
+  }
+
+  // ------------------------------------------------------------------- level
 
   private startLevel() {
     this.bricks.clear(true, true);
     this.balls.clear(true, true);
-
-    this.drops.getChildren().forEach((child) => {
-      const drop = child as Phaser.Physics.Arcade.Image;
-      const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
-      halo?.destroy();
-    });
-    this.drops.clear(true, true);
-    this.embeddedFruits.clear(true, true);
+    this.clearDrops();
+    this.decorations.clear(true, true);
     this.launched = false;
+    this.combo = 0;
+    this.transitioning = false;
 
-    const cols = 11;
-    const rows = Math.min(5 + Math.floor((this.level - 1) / 2), 7);
-    const gap = 8;
-    const brickW = 72;
-    const total = cols * brickW + (cols - 1) * gap;
-    const startX = (WIDTH - total) / 2 + brickW / 2;
-    const startY = 112;
+    const plan = buildLevel(this.level);
+    this.brickTotal = plan.cells.length;
 
-    const specials: PowerKind[] = ["pepper", "cherry", "pea", "carrot", "broccoli"];
-    const preferredCells = [2, 8, 14, 20, 26, 32, 38, 46, 52];
-    const specialCells = new Set(preferredCells.filter((cell) => cell < rows * cols));
-    let specialIndex = 0;
+    const total = 11 * BRICK_W + 10 * BRICK_GAP;
+    const startX = (WIDTH - total) / 2 + BRICK_W / 2;
 
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const index = row * cols + col;
-        const x = Math.round(startX + col * (brickW + gap));
-        const y = Math.round(startY + row * 40);
-        const brick = this.bricks.create(x, y, "brick") as Phaser.Physics.Arcade.Image;
-        brick.setDepth(2);
+    plan.cells.forEach((cell) => {
+      const x = Math.round(startX + cell.col * (BRICK_W + BRICK_GAP));
+      const y = Math.round(GRID_TOP + cell.row * ROW_HEIGHT);
+      const brick = this.bricks.create(
+        x,
+        y,
+        cell.hp > 1 ? "brick-solid" : "brick",
+      ) as Phaser.Physics.Arcade.Image;
+      brick.setDepth(2).setAlpha(0).setScale(0.7, 0.5);
 
-        const hp = this.level >= 3 && row < 2 ? 2 : 1;
-        const data: BrickData = { hp };
+      const data: BrickData = { hp: cell.hp };
+      const extras: Phaser.GameObjects.GameObject[] = [];
 
-        if (specialCells.has(index)) {
-          data.power = specials[specialIndex % specials.length];
-          specialIndex++;
+      if (cell.power) {
+        data.power = cell.power;
 
-          // No backing rectangle, no shadow ellipse, no border. The produce
-          // stays clean and crisp; the ice block itself supplies the depth.
-          const fruit = this.add
-            .image(x, y, `fruit-${data.power}`)
-            .setDisplaySize(35, 35)
-            .setAlpha(1)
-            .setDepth(2.62);
+        // No backing rectangle, no shadow ellipse, no border. The produce
+        // stays clean and crisp; the ice block itself supplies the depth.
+        const fruit = this.add
+          .image(x, y, `fruit-${cell.power}`)
+          .setDisplaySize(30, 30)
+          .setAlpha(0)
+          .setDepth(2.62);
 
-          // A tiny free-floating highlight suggests glass without boxing the
-          // fruit into its own framed UI element.
-          const glint = this.add
-            .rectangle(x - 5, y - 8, 20, 2, 0xffffff, 0.18)
-            .setAngle(-5)
-            .setDepth(2.9);
+        // A tiny free-floating highlight suggests glass without boxing the
+        // fruit into its own framed UI element.
+        const glint = this.add
+          .rectangle(x - 5, y - 8, 20, 2, 0xffffff, 0.18)
+          .setAngle(-5)
+          .setAlpha(0)
+          .setDepth(2.9);
 
-          this.embeddedFruits.addMultiple([fruit, glint]);
-          brick.setData("fruitSprite", fruit);
-          brick.setData("fruitGlint", glint);
-        }
-
-        brick.setData("brickData", data);
-        if (hp > 1) brick.setTint(0x8fc9e8);
-
-        if (this.game.renderer.type === Phaser.WEBGL && index % 4 === 0) {
-          brick.preFX?.addShine(0.14 + (index % 3) * 0.02, 0.16, 2.2, false);
-        }
+        this.decorations.addMultiple([fruit, glint]);
+        brick.setData("fruitSprite", fruit);
+        brick.setData("fruitGlint", glint);
+        extras.push(fruit, glint);
       }
-    }
+
+      brick.setData("brickData", data);
+
+      // Bottom rows land first: they are the ones a fast launch reaches first,
+      // so nothing can be struck while it is still fading in.
+      const delay = (plan.rows - 1 - cell.row) * 42 + cell.col * 7;
+      this.tweens.add({
+        targets: brick,
+        alpha: 1,
+        scaleX: 1,
+        scaleY: 1,
+        duration: 260,
+        delay,
+        ease: "Back.easeOut",
+      });
+      if (extras.length) {
+        this.tweens.add({ targets: extras, alpha: 1, duration: 260, delay: delay + 60 });
+      }
+    });
 
     this.spawnBall(this.paddle.x, PADDLE_Y - 28, 0, 0);
-    this.messageText
-      .setText(`LEVEL ${String(this.level).padStart(2, "0")}  •  SPACE / CLICK TO LAUNCH`)
-      .setVisible(true);
+    this.showHint(`${plan.name}  •  SPACE / CLICK TO LAUNCH`);
     this.refreshHud();
   }
 
+  private completeLevel() {
+    if (this.transitioning) return;
+    this.transitioning = true;
+    this.launched = false;
+    this.combo = 0;
+
+    const bonus = 500 + this.level * 100;
+    this.addScore(bonus);
+    this.sfx.play("levelup");
+    this.cameras.main.flash(220, 120, 200, 235);
+    this.hintText.setVisible(false);
+
+    this.balls.getChildren().forEach((child) => {
+      (child as Phaser.Physics.Arcade.Image).setVelocity(0, 0);
+    });
+
+    const progress = progressPetsForCompletedLevel(this.pets);
+    this.pets = progress.state;
+    this.habitat.sync(this.pets.pets);
+
+    const notes = [`LEVEL BONUS +${bonus}`];
+    if (progress.hatched.length === 1) {
+      notes.push(`YOUR EGG HATCHED — ${SPECIES_NAMES[progress.hatched[0].species]}!`);
+      this.sfx.play("egg");
+    } else if (progress.hatched.length > 1) {
+      notes.push(`${progress.hatched.length} EGGS HATCHED!`);
+      this.sfx.play("egg");
+    } else if (progress.foundEgg) {
+      notes.push("YOU FOUND AN EGG!");
+      this.sfx.play("egg");
+    }
+
+    this.showBanner(`LEVEL ${this.level} CLEAR`, notes.join("\n"), "#7DCFF3", 0.35);
+
+    this.time.delayedCall(1500, () => {
+      this.hideBanner();
+      this.level += 1;
+      this.startLevel();
+    });
+  }
+
+  private showHint(text: string) {
+    this.hintText.setText(text).setVisible(true).setAlpha(0);
+    this.tweens.add({ targets: this.hintText, alpha: 1, duration: 240 });
+  }
+
+  private showBanner(title: string, subtitle: string, color: string, dim = 0.55) {
+    this.tweens.killTweensOf([this.bannerText, this.subBannerText, this.scrim]);
+    this.tweens.add({ targets: this.scrim, alpha: dim, duration: 260 });
+
+    this.bannerText.setText(title).setColor(color).setAlpha(0).setScale(0.7);
+    this.subBannerText.setText(subtitle).setAlpha(0);
+
+    this.tweens.add({
+      targets: this.bannerText,
+      alpha: 1,
+      scale: 1,
+      duration: 300,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({ targets: this.subBannerText, alpha: 1, duration: 300, delay: 120 });
+  }
+
+  private hideBanner() {
+    this.tweens.killTweensOf(this.scrim);
+    this.tweens.add({
+      targets: [this.bannerText, this.subBannerText, this.scrim],
+      alpha: 0,
+      duration: 200,
+    });
+  }
+
+  // ------------------------------------------------------------------- balls
+
   private spawnBall(x: number, y: number, vx: number, vy: number) {
-    const ball = this.balls.create(Math.round(x), Math.round(y), "ball") as Phaser.Physics.Arcade.Image;
+    const ball = this.balls.create(
+      Math.round(x),
+      Math.round(y),
+      "ball",
+    ) as Phaser.Physics.Arcade.Image;
     ball.setCircle(BALL_RADIUS);
     ball.setCollideWorldBounds(true);
     ball.setBounce(1, 1);
+    ball.setDepth(6.5);
     this.dynamicBody(ball).allowGravity = false;
     ball.setVelocity(vx, vy);
     ball.setData("prevX", ball.x);
     ball.setData("prevY", ball.y);
+    ball.setData("trail", []);
+    if (this.explosiveHits > 0) ball.setTint(COLORS.red);
     return ball;
   }
 
@@ -446,53 +806,80 @@ class GameScene extends Phaser.Scene {
       this.dynamicBody(ball).updateFromGameObject();
       ball.setData("prevX", x);
       ball.setData("prevY", y);
+      ball.setData("trail", []);
     });
   }
 
   private launch() {
-    if (this.gameOver || this.launched) return;
+    if (this.gameOver || this.launched || this.transitioning) return;
     this.launched = true;
-    this.messageText.setVisible(false);
+    this.hintText.setVisible(false);
+    this.aimGfx.clear();
+    this.sfx.play("launch");
 
+    const angle = this.aimAngle();
+    const speed = this.targetBallSpeed();
     this.balls.getChildren().forEach((child, index) => {
       const ball = child as Phaser.Physics.Arcade.Image;
+      const spread = angle + Phaser.Math.DegToRad(index * 9 - 9);
       ball.setData("prevX", ball.x);
       ball.setData("prevY", ball.y);
-      ball.setVelocity(index % 2 === 0 ? 245 : -245, -360);
+      ball.setVelocity(Math.sin(spread) * speed, -Math.cos(spread) * speed);
     });
   }
 
-  private onBallBrick(ballObj: Phaser.GameObjects.GameObject, brickObj: Phaser.GameObjects.GameObject) {
+  // ------------------------------------------------------------------ bricks
+
+  private onBallBrick(
+    ballObj: Phaser.GameObjects.GameObject,
+    brickObj: Phaser.GameObjects.GameObject,
+  ) {
     const ball = ballObj as Phaser.Physics.Arcade.Image;
     const brick = brickObj as Phaser.Physics.Arcade.Image;
-    if (!brick.active) return;
+    if (!brick.active || this.transitioning) return;
 
     const data = brick.getData("brickData") as BrickData;
     data.hp -= 1;
-    this.score += 100;
     this.flashBrick(brick);
 
     if (data.hp > 0) {
-      brick.setTexture("brick-cracked").setTint(0xd7efff);
-      this.refreshHud();
+      brick.setTexture("brick-cracked");
+      this.addScore(25);
+      this.sfx.play("crack");
+      this.sparkBurst.setParticleTint(COLORS.iceLight);
+      this.sparkBurst.emitParticleAt(ball.x, ball.y, 4);
       return;
     }
+
+    this.combo += 1;
+    const multiplier = comboMultiplier(this.combo);
+    const points = 100 * multiplier;
 
     const hitX = brick.x;
     const hitY = brick.y;
     this.breakBrick(brick, true);
+    this.addScore(points);
+    this.popup(
+      hitX,
+      hitY,
+      multiplier > 1 ? `+${points}  ×${multiplier}` : `+${points}`,
+      multiplier > 1 ? "#F2C94C" : "#F7F2E7",
+    );
+    this.sfx.play("shatter", Math.min(12, this.combo));
+    this.pulseScore();
 
     if (this.explosiveHits > 0) {
       this.explosiveHits -= 1;
       this.explodeAt(hitX, hitY);
-      ball.setTint(this.explosiveHits > 0 ? COLORS.red : 0xffffff);
+      if (this.explosiveHits === 0) {
+        this.balls.getChildren().forEach((child) => {
+          (child as Phaser.Physics.Arcade.Image).clearTint();
+        });
+      }
+      this.refreshChips();
     }
 
-    this.refreshHud();
-    if (this.bricks.countActive(true) === 0) {
-      this.level += 1;
-      this.time.delayedCall(700, () => this.startLevel());
-    }
+    if (this.bricks.countActive(true) === 0) this.completeLevel();
   }
 
   private breakBrick(brick: Phaser.Physics.Arcade.Image, canDrop: boolean) {
@@ -505,165 +892,257 @@ class GameScene extends Phaser.Scene {
     (brick.getData("fruitSprite") as Phaser.GameObjects.Image | undefined)?.destroy();
     (brick.getData("fruitGlint") as Phaser.GameObjects.Rectangle | undefined)?.destroy();
 
-    this.shatter(x, y);
+    this.shardBurst.emitParticleAt(x, y, 10);
     brick.disableBody(true, true);
-    this.score += 50;
     if (canDrop && data.power) this.spawnDrop(x, y, data.power);
   }
 
   private explodeAt(x: number, y: number) {
-    this.cameras.main.shake(90, 0.004);
+    this.cameras.main.shake(120, 0.005);
+    this.sfx.play("explode");
 
     const ring = this.add.circle(x, y, 10, COLORS.red, 0.28).setDepth(6);
     this.tweens.add({
       targets: ring,
-      radius: 78,
+      radius: 84,
       alpha: 0,
-      duration: 230,
+      duration: 260,
       onComplete: () => ring.destroy(),
     });
+
+    this.sparkBurst.setParticleTint(COLORS.red);
+    this.sparkBurst.emitParticleAt(x, y, 16);
 
     const victims = this.bricks.getChildren().filter((child) => {
       const brick = child as Phaser.Physics.Arcade.Image;
       return brick.active && Phaser.Math.Distance.Between(x, y, brick.x, brick.y) < 90;
     }) as Phaser.Physics.Arcade.Image[];
 
-    victims.forEach((brick) => {
-      this.score += 75;
-      this.breakBrick(brick, true);
-    });
+    if (victims.length) {
+      const points = 75 * victims.length;
+      this.addScore(points);
+      this.popup(x, y - 26, `+${points}  BLAST`, "#E4573D");
+    }
+    victims.forEach((brick) => this.breakBrick(brick, true));
   }
 
   private flashBrick(brick: Phaser.Physics.Arcade.Image) {
+    this.tweens.killTweensOf(brick);
+    brick.setAlpha(1).setScale(1);
     this.tweens.add({
       targets: brick,
       alpha: 0.32,
-      scaleX: 0.96,
-      scaleY: 1.06,
+      scaleX: 0.94,
+      scaleY: 1.1,
       duration: 46,
       yoyo: true,
+      onComplete: () => brick.setAlpha(1).setScale(1),
     });
   }
 
-  private shatter(x: number, y: number) {
-    for (let i = 0; i < 12; i++) {
-      const shard = this.add
-        .triangle(
-          x,
-          y,
-          0,
-          0,
-          Phaser.Math.Between(5, 14),
-          Phaser.Math.Between(2, 8),
-          Phaser.Math.Between(-5, 0),
-          Phaser.Math.Between(5, 14),
-          i % 4 === 0 ? 0xffffff : 0xbcecff,
-          Phaser.Math.FloatBetween(0.58, 0.94),
-        )
-        .setDepth(4);
+  private popup(x: number, y: number, text: string, color: string) {
+    const label = this.add
+      .text(x, y, text, {
+        fontFamily: FONT,
+        fontSize: "17px",
+        color,
+        stroke: "#081735",
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5)
+      .setDepth(25);
 
-      const angle = Phaser.Math.FloatBetween(0, Math.PI * 2);
-      const distance = Phaser.Math.Between(24, 74);
-      this.tweens.add({
-        targets: shard,
-        x: x + Math.cos(angle) * distance,
-        y: y + Math.sin(angle) * distance + Phaser.Math.Between(4, 24),
-        angle: Phaser.Math.Between(-240, 240),
-        scale: Phaser.Math.FloatBetween(0.45, 1.2),
-        alpha: 0,
-        duration: Phaser.Math.Between(260, 520),
-        ease: "Quad.easeOut",
-        onComplete: () => shard.destroy(),
-      });
-    }
+    this.tweens.add({
+      targets: label,
+      y: y - 34,
+      alpha: 0,
+      duration: 640,
+      ease: "Cubic.easeOut",
+      onComplete: () => label.destroy(),
+    });
   }
 
+  private pulseScore() {
+    this.tweens.killTweensOf(this.scoreText);
+    this.scoreText.setScale(1.12);
+    this.tweens.add({ targets: this.scoreText, scale: 1, duration: 180, ease: "Quad.easeOut" });
+  }
+
+  // ------------------------------------------------------------------- drops
+
   private spawnDrop(x: number, y: number, kind: PowerKind) {
-    const drop = this.drops.create(Math.round(x), Math.round(y), `fruit-${kind}`) as Phaser.Physics.Arcade.Image;
-    drop.setDisplaySize(48, 48);
+    const drop = this.drops.create(
+      Math.round(x),
+      Math.round(y),
+      `fruit-${kind}`,
+    ) as Phaser.Physics.Arcade.Image;
+
+    const scale = 46 / FRUIT_SOURCE_SIZE;
+    drop.setScale(scale * 0.4);
     drop.setData("kind", kind);
-    drop.setVelocityY(155);
     drop.setDepth(8);
+    drop.setVelocityY(160);
     this.dynamicBody(drop).allowGravity = false;
 
-    const halo = this.add.circle(x, y, 30, COLORS.cream, 0.16).setDepth(7);
-    this.tweens.add({ targets: halo, scale: 1.42, alpha: 0, duration: 650, repeat: -1 });
-    drop.setData("halo", halo);
+    this.tweens.add({
+      targets: drop,
+      scaleX: scale,
+      scaleY: scale,
+      duration: 280,
+      ease: "Back.easeOut",
+    });
+    this.tweens.add({
+      targets: drop,
+      angle: { from: -7, to: 7 },
+      duration: 900,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
+
+    // A thin accent ring reads as "collect me" without muddying the artwork.
+    const ring = this.add.circle(x, y, 24).setStrokeStyle(2, POWERS[kind].accent, 0.7).setDepth(7.5);
+    this.tweens.add({
+      targets: ring,
+      scale: 1.7,
+      alpha: 0,
+      duration: 780,
+      repeat: -1,
+      ease: "Quad.easeOut",
+    });
+    drop.setData("ring", ring);
+  }
+
+  private updateDrops() {
+    const paddleBounds = this.paddle.getBounds();
+
+    this.drops.getChildren().forEach((child) => {
+      const drop = child as Phaser.Physics.Arcade.Image;
+      if (!drop.active) return;
+
+      const ring = drop.getData("ring") as Phaser.GameObjects.Arc | undefined;
+      ring?.setPosition(drop.x, drop.y);
+
+      if (Phaser.Geom.Intersects.RectangleToRectangle(paddleBounds, drop.getBounds())) {
+        this.catchDrop(drop);
+        return;
+      }
+
+      if (drop.y > FIELD_BOTTOM) this.destroyDrop(drop);
+    });
+  }
+
+  private destroyDrop(drop: Phaser.Physics.Arcade.Image) {
+    (drop.getData("ring") as Phaser.GameObjects.Arc | undefined)?.destroy();
+    drop.destroy();
+  }
+
+  private clearDrops() {
+    this.drops.getChildren().forEach((child) => {
+      (
+        (child as Phaser.Physics.Arcade.Image).getData("ring") as
+          | Phaser.GameObjects.Arc
+          | undefined
+      )?.destroy();
+    });
+    this.drops.clear(true, true);
   }
 
   private catchDrop(drop: Phaser.Physics.Arcade.Image) {
     if (!drop.active) return;
     const kind = drop.getData("kind") as PowerKind;
-    const halo = drop.getData("halo") as Phaser.GameObjects.Arc | undefined;
-    halo?.destroy();
-    drop.destroy();
+    const x = drop.x;
+    const y = drop.y;
+
+    this.destroyDrop(drop);
+    this.sparkBurst.setParticleTint(POWERS[kind].accent);
+    this.sparkBurst.emitParticleAt(x, y, 14);
     this.activatePower(kind);
   }
 
-  private activatePower(kind: PowerKind) {
-    const names: Record<PowerKind, string> = {
-      pepper: "HOT BALL!",
-      cherry: "DOUBLE TROUBLE!",
-      pea: "PEA SHOOTER ×3!",
-      carrot: "TURBO PADDLE!",
-      broccoli: "BIG BAR!",
-    };
+  // --------------------------------------------------------------- power-ups
 
-    this.showPowerMessage(names[kind]);
-    this.score += 250;
+  private activatePower(kind: PowerKind) {
+    this.showPowerMessage(POWERS[kind].label, POWERS[kind].accent);
+    this.addScore(250);
 
     if (kind === "pepper") {
       this.explosiveHits = 3;
+      this.sfx.play("power");
       this.balls.getChildren().forEach((child) => {
         (child as Phaser.Physics.Arcade.Image).setTint(COLORS.red);
       });
     } else if (kind === "cherry") {
+      this.sfx.play("multiball");
       this.multiplyBalls(2);
     } else if (kind === "pea") {
+      this.sfx.play("multiball");
       this.multiplyBalls(3);
     } else if (kind === "carrot") {
+      this.sfx.play("power");
       this.setTimedEffect(
         "carrot",
-        12000,
         () => {
-          this.paddleSpeed = 760;
-          this.paddle.setTint(COLORS.red);
+          this.paddleTurbo = true;
+          this.refreshPaddleTint();
         },
         () => {
-          this.paddleSpeed = 520;
-          this.paddle.clearTint();
+          this.paddleTurbo = false;
+          this.refreshPaddleTint();
         },
       );
     } else if (kind === "broccoli") {
+      this.sfx.play("power");
       this.setTimedEffect(
         "broccoli",
-        12000,
-        () => {
-          this.paddle.setDisplaySize(this.basePaddleWidth * 1.55, this.paddleHeight);
-          this.paddle.setTint(COLORS.green);
-          this.movePaddle(this.paddle.x);
-        },
-        () => {
-          this.paddle.setDisplaySize(this.basePaddleWidth, this.paddleHeight);
-          this.paddle.clearTint();
-          this.movePaddle(this.paddle.x);
-        },
+        () => this.setPaddleWidth(true),
+        () => this.setPaddleWidth(false),
       );
     }
 
-    this.refreshHud();
+    this.refreshChips();
+  }
+
+  /**
+   * Swapping textures rather than stretching one keeps the paddle's rounded
+   * caps and centre highlight crisp at both widths.
+   */
+  private setPaddleWidth(wide: boolean) {
+    const from = this.paddle.displayWidth;
+    this.paddle.setTexture(wide ? "paddle-wide" : "paddle");
+    this.paddle.setDisplaySize(wide ? WIDE_PADDLE_WIDTH : BASE_PADDLE_WIDTH, PADDLE_HEIGHT);
+    this.refreshPaddleTint();
+
+    this.tweens.killTweensOf(this.paddle);
+    this.paddle.setScale(from / this.paddle.width, 1);
+    this.tweens.add({
+      targets: this.paddle,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 220,
+      ease: "Back.easeOut",
+    });
+    this.movePaddle(this.paddle.x);
+  }
+
+  /** Big bar wins over turbo, so the two power-ups never cancel each other out. */
+  private refreshPaddleTint() {
+    if (this.timedEffects.has("broccoli")) this.paddle.setTint(COLORS.green);
+    else if (this.paddleTurbo) this.paddle.setTint(COLORS.red);
+    else this.paddle.clearTint();
   }
 
   private multiplyBalls(countPerBall: number) {
     const existing = this.balls.getChildren().slice() as Phaser.Physics.Arcade.Image[];
+    const speed = this.targetBallSpeed();
 
     existing.forEach((ball) => {
       const velocity = this.dynamicBody(ball).velocity.clone();
-      const speed = Math.max(440, velocity.length());
-      const baseAngle = velocity.angle();
+      const baseAngle = velocity.lengthSq() > 0 ? velocity.angle() : -Math.PI / 2;
 
       for (let i = 1; i < countPerBall; i++) {
-        const spread = Phaser.Math.DegToRad(i % 2 === 0 ? 17 : -17) * Math.ceil(i / 2);
+        if (this.balls.countActive(true) >= MAX_BALLS) return;
+        const spread = Phaser.Math.DegToRad(i % 2 === 0 ? 19 : -19) * Math.ceil(i / 2);
         const angle = baseAngle + spread;
         this.spawnBall(ball.x, ball.y, Math.cos(angle) * speed, Math.sin(angle) * speed);
       }
@@ -672,25 +1151,31 @@ class GameScene extends Phaser.Scene {
     this.launched = true;
   }
 
-  private setTimedEffect(kind: PowerKind, duration: number, start: () => void, end: () => void) {
+  /**
+   * The timer is registered before start() and cleared before end() so those
+   * callbacks can read the live set of active effects.
+   */
+  private setTimedEffect(kind: PowerKind, start: () => void, end: () => void) {
     this.timedEffects.get(kind)?.remove(false);
-    start();
 
     this.timedEffects.set(
       kind,
-      this.time.delayedCall(duration, () => {
-        end();
+      this.time.delayedCall(EFFECT_MS, () => {
         this.timedEffects.delete(kind);
+        end();
+        this.refreshChips();
       }),
     );
+
+    start();
   }
 
-  private showPowerMessage(text: string) {
+  private showPowerMessage(text: string, accent: number) {
     const label = this.add
-      .text(WIDTH / 2, HEIGHT / 2 + 40, text, {
-        fontFamily: "Arial Black, Arial, sans-serif",
-        fontSize: "36px",
-        color: "#F2C94C",
+      .text(WIDTH / 2, FIELD_BOTTOM / 2 + 60, text, {
+        fontFamily: FONT,
+        fontSize: "34px",
+        color: `#${accent.toString(16).padStart(6, "0")}`,
         stroke: "#081735",
         strokeThickness: 8,
         align: "center",
@@ -702,7 +1187,7 @@ class GameScene extends Phaser.Scene {
     this.tweens.add({
       targets: label,
       scale: 1,
-      y: label.y - 35,
+      y: label.y - 40,
       alpha: 0,
       duration: 900,
       ease: "Back.easeOut",
@@ -710,28 +1195,174 @@ class GameScene extends Phaser.Scene {
     });
   }
 
+  // -------------------------------------------------------------- power chips
+
+  private refreshChips() {
+    const active = new Set<PowerKind>(this.timedEffects.keys());
+    if (this.explosiveHits > 0) active.add("pepper");
+
+    this.chips.forEach((chip, kind) => {
+      if (active.has(kind)) return;
+      chip.container.destroy();
+      this.chips.delete(kind);
+    });
+
+    active.forEach((kind) => {
+      if (!this.chips.has(kind)) this.chips.set(kind, this.createChip(kind));
+    });
+
+    const chips = [...this.chips.values()];
+    const spacing = 118;
+    chips.forEach((chip, i) => {
+      chip.container.x = WIDTH / 2 + (i - (chips.length - 1) / 2) * spacing;
+      chip.container.y = 54;
+    });
+  }
+
+  private createChip(kind: PowerKind): Chip {
+    const width = 110;
+    const height = 28;
+    const accent = POWERS[kind].accent;
+    const barWidth = width - 42;
+
+    const plate = this.add.graphics();
+    plate.fillStyle(0x0d3554, 0.62);
+    plate.fillRoundedRect(-width / 2, -height / 2, width, height, 8);
+    plate.lineStyle(1, 0x9fdcf5, 0.45);
+    plate.strokeRoundedRect(-width / 2 + 0.5, -height / 2 + 0.5, width - 1, height - 1, 8);
+
+    const icon = this.add.image(-width / 2 + 17, 0, `fruit-${kind}`).setDisplaySize(22, 22);
+    const label = this.add
+      .text(-width / 2 + 32, -10, POWERS[kind].chip, {
+        fontFamily: FONT,
+        fontSize: "11px",
+        color: "#F7F2E7",
+      })
+      .setOrigin(0, 0);
+
+    const track = this.add
+      .rectangle(-width / 2 + 32, 8, barWidth, 3, 0xffffff, 0.16)
+      .setOrigin(0, 0.5);
+    const bar = this.add.rectangle(-width / 2 + 32, 8, barWidth, 3, accent, 1).setOrigin(0, 0.5);
+
+    const container = this.add
+      .container(WIDTH / 2, 54, [plate, icon, label, track, bar])
+      .setDepth(12)
+      .setScale(0.6);
+    this.tweens.add({ targets: container, scale: 1, duration: 220, ease: "Back.easeOut" });
+
+    return { kind, container, bar, barWidth };
+  }
+
+  private updateChips() {
+    this.chips.forEach((chip, kind) => {
+      const timer = this.timedEffects.get(kind);
+      const ratio = kind === "pepper" ? this.explosiveHits / 3 : timer ? 1 - timer.getProgress() : 0;
+      chip.bar.width = Math.max(0, chip.barWidth * ratio);
+    });
+  }
+
+  // ------------------------------------------------------------------- flow
+
+  /** Balls shatter on the ice floor rather than sliding into the habitat. */
+  private sinkBall(ball: Phaser.Physics.Arcade.Image) {
+    this.shardBurst.emitParticleAt(ball.x, FIELD_BOTTOM - 10, 8);
+    ball.destroy();
+  }
+
   private loseLife() {
     this.launched = false;
     this.lives -= 1;
-    this.refreshHud();
+    this.combo = 0;
+    this.explosiveHits = 0;
+    this.trailGfx.clear();
+    this.refreshChips();
+    this.refreshLives();
+
+    this.cameras.main.shake(260, 0.011);
+    this.cameras.main.flash(240, 120, 24, 18);
+    this.sfx.play("lose");
+    this.habitat.startle();
 
     if (this.lives <= 0) {
-      this.gameOver = true;
-      this.messageText
-        .setText(`GAME OVER\nSCORE ${String(this.score).padStart(6, "0")}\nPRESS R TO RESTART`)
-        .setVisible(true)
-        .setStyle({ fontSize: "28px", align: "center", color: "#E4573D" });
+      this.endGame();
       return;
     }
 
     this.spawnBall(this.paddle.x, PADDLE_Y - 28, 0, 0);
-    this.messageText.setText("BALL LOST  •  SPACE / CLICK TO LAUNCH").setVisible(true);
+    this.showHint("BALL LOST  •  SPACE / CLICK TO LAUNCH");
   }
 
-  private refreshHud() {
+  private endGame() {
+    this.gameOver = true;
+    this.gameOverAt = this.time.now;
+    this.hintText.setVisible(false);
+    this.aimGfx.clear();
+    this.clearDrops();
+    this.sfx.play("gameover");
+    writeBest(this.best);
+
+    this.timedEffects.forEach((timer) => timer.remove(false));
+    this.timedEffects.clear();
+    this.paddleTurbo = false;
+    this.setPaddleWidth(false);
+    this.refreshChips();
+    this.shownScore = this.score;
     this.scoreText.setText(`SCORE ${String(this.score).padStart(6, "0")}`);
-    this.levelText.setText(`LEVEL ${String(this.level).padStart(2, "0")}`);
-    this.livesText.setText(`BALLS × ${this.lives}`);
+
+    const lines = [
+      `SCORE ${String(this.score).padStart(6, "0")}`,
+      this.beatBest ? "NEW BEST!" : `BEST ${String(this.best).padStart(6, "0")}`,
+      "PRESS SPACE TO PLAY AGAIN",
+    ];
+    this.showBanner("GAME OVER", lines.join("\n"), "#E4573D");
+  }
+
+  private tryRestart() {
+    if (!this.gameOver || this.time.now - this.gameOverAt < 500) return;
+    this.hideBanner();
+    this.scene.restart();
+  }
+
+  private togglePause() {
+    this.paused = !this.paused;
+    this.pauseText.setVisible(this.paused);
+    if (this.paused) this.physics.world.pause();
+    else this.physics.world.resume();
+  }
+
+  private toggleMute() {
+    this.sfx.toggleMute();
+    this.updateMuteLabel();
+  }
+
+  private updateMuteLabel() {
+    this.muteText.setText(this.sfx.isMuted ? "SOUND OFF — M" : "SOUND ON — M   •   PAUSE — P");
+  }
+}
+
+function comboMultiplier(combo: number) {
+  return Phaser.Math.Clamp(1 + Math.floor((combo - 1) / 4), 1, 5);
+}
+
+function getAudioContext(scene: Phaser.Scene): AudioContext | null {
+  const manager = scene.sound as Partial<Phaser.Sound.WebAudioSoundManager>;
+  return manager.context ?? null;
+}
+
+function readBest() {
+  try {
+    return Math.max(0, Number.parseInt(localStorage.getItem(BEST_KEY) ?? "0", 10) || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function writeBest(best: number) {
+  try {
+    localStorage.setItem(BEST_KEY, String(best));
+  } catch {
+    // Storage can be unavailable in private/restricted contexts.
   }
 }
 
@@ -757,4 +1388,10 @@ const config: Phaser.Types.Core.GameConfig = {
   scene: [GameScene],
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+// Handy for poking at the running scene from the dev console; stripped from
+// production builds by the bundler.
+if (import.meta.env.DEV) {
+  (window as unknown as Record<string, unknown>).fruitblaster = game;
+}
