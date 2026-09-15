@@ -24,6 +24,12 @@ const STORAGE_KEY = "fruitblaster:pets:v2";
 const SPECIES: DinoSpecies[] = ["stretch", "spike", "chomp"];
 const MAX_PETS = 10;
 
+// PLAYTEST TUNING: cranked up so the habitat fills in within a couple of level
+// clears. Ship values are EGG_CHANCE 0.3 and HATCH_LEVELS [2, 4], which works
+// out to roughly six clears before the first dino appears.
+const EGG_CHANCE = 1;
+const HATCH_LEVELS: [min: number, max: number] = [1, 2];
+
 const emptyState = (): PetSessionState => ({
   completedLevels: 0,
   pets: [],
@@ -62,7 +68,7 @@ export function savePetSession(state: PetSessionState) {
 
 export function progressPetsForCompletedLevel(
   current: PetSessionState,
-  eggChance = 0.3,
+  eggChance = EGG_CHANCE,
 ): PetProgressResult {
   const state: PetSessionState = {
     completedLevels: current.completedLevels + 1,
@@ -89,7 +95,7 @@ export function progressPetsForCompletedLevel(
       stage: "egg",
       species: randomSpecies(),
       foundAtCompletedLevel: state.completedLevels,
-      levelsToHatch: randomInt(2, 4),
+      levelsToHatch: randomInt(...HATCH_LEVELS),
     };
     state.pets.push(foundEgg);
   }
